@@ -1,0 +1,37 @@
+@import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #F0F0EE;
+  --surface:  #FFFFFF;
+  --surface2: #E8E8E6;
+  --surface3: #DDDDD8;
+  --border:   #0000FF;
+  --border2:  #0000CC;
+  --blue:     #0000FF;
+  --blue-dim: #0000AA;
+  --blue-bg:  rgba(0,0,255,0.05);
+  --text:     #050505;
+  --text2:    #222222;
+  --text3:    #666666;
+  --green:    #005500;
+  --red:      #BB0000;
+  --pixel:    'Press Start 2P', monospace;
+  --mono:     'Space Mono', monospace;
+  --sans:     'Space Mono', monospace;
+}
+
+html, body, #root {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar { width: 3px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--blue); }
+
+input, select, textarea, button { font-family: var(--mono); }
