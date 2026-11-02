@@ -11,7 +11,6 @@ export const RELAYS = [
 export const KIND_METADATA   = 0      // NIP-01 user profile
 export const KIND_GROUP      = 30001  // Addressable event: group definition
 export const KIND_EXPENSE    = 9000   // Expense event
-export const KIND_SETTLEMENT = 9001  // Debtor settlement CLAIM (pending until payee confirms)
-export const KIND_CONFIRMATION = 9002  // Payee signed receipt confirmation
+export const KIND_SETTLEMENT = 9001  // Settlement / payment record
 
 export const APP_TAG = 'splitsats'    // Tag all our events for filtering

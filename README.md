@@ -17,13 +17,6 @@ npm install
 npm run dev
 ```
 
-Per verificare le regole dei saldi prima di una PR:
-
-```bash
-npm test
-npm run build
-```
-
 Apri `http://localhost:5173` con l'estensione **Alby** installata.
 
 ## Deploy su Vercel
@@ -42,8 +35,7 @@ src/
 ├── App.jsx              # Root + routing
 ├── store/index.js       # Zustand store (auth, groups, expenses)
 ├── lib/
-│   ├── nostr.js         # publishEvent, Nostr subscriptions
-│   ├── relay-pool.js    # NIP-20 ACK, retry on reconnect, subscriptions
+│   ├── nostr.js         # RelayPool, publishEvent, fetch helpers
 │   ├── lightning.js     # WebLN, LNURL-pay
 │   ├── balances.js      # Calcolo e semplificazione debiti
 │   ├── storage.js       # localStorage cache
@@ -52,20 +44,11 @@ src/
 └── components/          # UI primitives + modals
 ```
 
-## Conferma pagamenti
-
-Le richieste di pagamento (anche WebLN) rimangono **in attesa** finché il destinatario non firma una conferma Nostr. Una risposta WebLN da sola non prova la ricezione. I vecchi pagamenti non confermati non vengono più sottratti ai saldi: verifica la migrazione prima del deploy. Dettagli: [docs/PAYMENT-CONFIRMATION.md](docs/PAYMENT-CONFIRMATION.md).
-
-## Affidabilità della pubblicazione
-
-La pubblicazione degli eventi attende un ACK `OK` da almeno un relay Nostr. In assenza di ACK entro 12 secondi l'esito è **incerto**, quindi bisogna controllare il gruppo prima di riprovare. Non inviare nuovamente satoshi solo perché la pubblicazione su Nostr non è stata confermata. Dettagli: [docs/RELAY-PUBLICATION.md](docs/RELAY-PUBLICATION.md).
-
 ## Nostr event kinds usati
 
 | Kind  | Uso                        |
 |-------|----------------------------|
 | 0     | Profilo utente (NIP-01)    |
 | 9000  | Spesa                      |
-| 9001  | Dichiarazione di pagamento (in attesa) |
-| 9002  | Conferma del destinatario |
+| 9001  | Pagamento / settlement     |
 | 30001 | Definizione gruppo         |
