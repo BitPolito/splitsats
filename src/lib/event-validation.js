@@ -109,9 +109,32 @@ export function parseSettlementEvent(event, group) {
       !group.members.includes(data.to) || data.from === data.to || !positiveSats(data.amount) ||
       !hasSingleTag(event, 'p', data.to) ||
       (data.id !== undefined && !nonemptyString(data.id, 128))) return null
+  if (data.method !== undefined && !['manual', 'webln'].includes(data.method)) return null
   return {
     id: data.id || event.id, from: data.from, to: data.to, amount: data.amount,
+    method: data.method || 'legacy', walletReported: data.method === 'webln' && data.walletReported === true,
     settledAt: Number.isSafeInteger(data.settledAt) ? data.settledAt : event.created_at,
+    _eventId: event.id, _pubkey: event.pubkey,
+  }
+}
+
+// The receiver, NOT the payer, attests to receipt. Bind the confirmation to
+// the exact signed settlement event ID so a claim cannot be replaced later.
+export function parseConfirmationEvent(event, group) {
+  if (!isValidEnvelope(event, 9002) || !validGroup(group) ||
+      !hasSingleTag(event, 'g', group.id)) return null
+  const data = readObject(event.content)
+  if (!data || !HEX_EVENT.test(data.settlementEventId || '') ||
+      !validPubkey(data.from) || !validPubkey(data.to) || data.from === data.to ||
+      !group.members.includes(data.from) || !group.members.includes(data.to) ||
+      event.pubkey !== data.to || !positiveSats(data.amount) ||
+      !hasSingleTag(event, 'e', data.settlementEventId) ||
+      !hasSingleTag(event, 'p', data.from) ||
+      (data.id !== undefined && !nonemptyString(data.id, 128))) return null
+  return {
+    id: data.id || event.id, settlementEventId: data.settlementEventId,
+    from: data.from, to: data.to, amount: data.amount,
+    confirmedAt: Number.isSafeInteger(data.confirmedAt) ? data.confirmedAt : event.created_at,
     _eventId: event.id, _pubkey: event.pubkey,
   }
 }

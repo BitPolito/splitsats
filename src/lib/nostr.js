@@ -1,7 +1,7 @@
 import { verifyEvent } from 'nostr-tools'
 import { nip19 } from 'nostr-tools'
 import { RELAYS } from './constants'
-import { parseGroupEvent, parseExpenseEvent, parseSettlementEvent } from './event-validation'
+import { parseGroupEvent, parseExpenseEvent, parseSettlementEvent, parseConfirmationEvent } from './event-validation'
 
 // ─── npub ↔ hex conversion ────────────────────────────────────────────────────
 // Nostr relays always use hex pubkeys. npub is only a display format.
@@ -207,6 +207,18 @@ export function subscribeSettlements(groupId, hexMembers, onSettlement, onEose) 
     onEvent: (event) => {
       const settlement = parseSettlementEvent(event, { id: groupId, members: hexMembers })
       if (settlement) onSettlement(settlement)
+    },
+    onEose,
+  })
+}
+// ─── Recipient-signed payment confirmations ─────────────────────────────────
+export function subscribeConfirmations(groupId, hexMembers, onConfirmation, onEose) {
+  return pool.subscribe({
+    id:      'confirmations_' + groupId,
+    filters: [{ kinds: [9002], authors: hexMembers, '#g': [groupId], limit: 200 }],
+    onEvent: event => {
+      const confirmation = parseConfirmationEvent(event, { id: groupId, members: hexMembers })
+      if (confirmation) onConfirmation(confirmation)
     },
     onEose,
   })

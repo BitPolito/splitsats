@@ -28,19 +28,31 @@ export default function SettleModal({ debt, profiles, groupId, onClose, onSettle
   const [errMsg,  setErrMsg]  = useState('')
   const [invoice, setInvoice] = useState('')
   const [copied,  setCopied]  = useState(false)
+  const [sent, setSent] = useState(false)
 
   const toProfile = profiles[debt.to] || {}
   const toName    = toProfile.name || truncate(debt.to, 8)
-  const lnAddress = toProfile.lud16 || toProfile.lud06
+  const lnAddress = toProfile.lud16 || '' // lud06 is bech32 LNURL, not a user@domain Lightning Address
   const webln     = hasWebLN()
 
   const handlePay = async () => {
+    if (sent) return
+    let walletCompleted = false
     setStatus('resolving'); setErrMsg('')
     try {
       await payLightningAddress(lnAddress, debt.amount)
-      setStatus('success')
-      setTimeout(() => { onSettled(groupId, { from: debt.from, to: debt.to, amount: debt.amount }); onClose() }, 1400)
-    } catch (e) { setErrMsg(e.message); setStatus('error') }
+      // A wallet success response is not an independent settlement proof.
+      // Do NOT mark the balance paid until the recipient signs a confirmation.
+      walletCompleted = true
+      setSent(true)
+      await onSettled(groupId, { from: debt.from, to: debt.to, amount: debt.amount,
+        method: 'webln', walletReported: true })
+      setStatus('pending')
+    } catch (e) {
+      setErrMsg((walletCompleted ? 'Il wallet ha segnalato il pagamento, ma non siamo riusciti a pubblicare la richiesta. NON pagare di nuovo. ' :
+        'Se il wallet ha avviato un pagamento, controlla la sua cronologia prima di riprovare. ') + (e.message || 'Errore'))
+      setStatus('error')
+    }
   }
 
   const handleShowQR = async () => {
@@ -51,11 +63,22 @@ export default function SettleModal({ debt, profiles, groupId, onClose, onSettle
     } catch (e) { setErrMsg(e.message); setStatus('error') }
   }
 
-  const handleCopy = () => { navigator.clipboard.writeText(invoice); setCopied(true); setTimeout(() => setCopied(false), 2000) }
-  const handleManual = () => { onSettled(groupId, { from: debt.from, to: debt.to, amount: debt.amount }); onClose() }
+  const handleCopy = async () => {
+    try { await navigator.clipboard.writeText(invoice); setCopied(true) }
+    catch { setErrMsg('Impossibile copiare la invoice') }
+  }
+
+  const handleManual = async () => {
+    setStatus('recording'); setErrMsg('')
+    try {
+      await onSettled(groupId, { from: debt.from, to: debt.to, amount: debt.amount,
+        method: sent ? 'webln' : 'manual', walletReported: sent })
+      setStatus('pending')
+    } catch (e) { setErrMsg(e.message || 'Impossibile registrare la richiesta'); setStatus('error') }
+  }
 
   return (
-    <ModalShell onClose={onClose}>
+    <ModalShell onClose={() => { if (status !== 'resolving' && status !== 'recording') onClose() }}>
       <div style={{ fontFamily: 'var(--pixel)', fontSize: 11, color: 'var(--blue)' }}>
         PAY ⚡ LIGHTNING
       </div>
@@ -89,28 +112,32 @@ export default function SettleModal({ debt, profiles, groupId, onClose, onSettle
 
       {/* Status */}
       {status === 'resolving' && <div style={{ textAlign: 'center', fontFamily: 'var(--pixel)', fontSize: 8, color: 'var(--text3)' }}>CONNECTING...</div>}
-      {status === 'success'   && <div style={{ textAlign: 'center', fontFamily: 'var(--pixel)', fontSize: 9, color: 'var(--green)', border: '2px solid var(--green)', padding: '10px' }}>✓ PAYMENT SENT</div>}
+      {status === 'pending'   && <div style={{ textAlign: 'center', fontFamily: 'var(--pixel)', fontSize: 9, color: 'var(--green)', border: '2px solid var(--green)', padding: '10px' }}>✓ RICHIESTA REGISTRATA: ATTESA CONFERMA DEL DESTINATARIO</div>}
+      {status === 'recording' && <div style={{ textAlign: 'center', fontFamily: 'var(--pixel)', fontSize: 8 }}>SALVATAGGIO SU NOSTR...</div>}
       {status === 'error'     && <div style={{ fontFamily: 'var(--pixel)', fontSize: 8, color: 'var(--red)', border: '2px solid var(--red)', padding: '10px', textAlign: 'center', lineHeight: 2 }}>{errMsg}</div>}
 
-      {!webln && status !== 'qr' && status !== 'success' && (
+      {!webln && status !== 'qr' && status !== 'pending' && (
         <div style={{ border: '2px solid var(--blue)', padding: '10px 14px', fontFamily: 'var(--pixel)', fontSize: 7, color: 'var(--text2)', lineHeight: 2, background: 'var(--blue-bg)' }}>
           ALBY NON TROVATO — USA IL QR CODE PER PAGARE.
         </div>
       )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {status !== 'qr' && status !== 'success' && (
-          <Button variant="primary" disabled={!webln || !lnAddress || status === 'resolving'} onClick={handlePay}>
+        {status !== 'qr' && status !== 'pending' && (
+          <Button variant="primary" disabled={!webln || !lnAddress || sent || status === 'resolving' || status === 'recording'} onClick={handlePay}>
             {status === 'resolving' ? '// CONNECTING...' : '> PAY WITH ALBY'}
           </Button>
         )}
-        {lnAddress && status !== 'qr' && status !== 'success' && (
-          <Button variant="ghost" disabled={status === 'resolving'} onClick={handleShowQR}>MOSTRA QR CODE</Button>
+        {lnAddress && !sent && status !== 'qr' && status !== 'pending' && (
+          <Button variant="ghost" disabled={status === 'resolving' || status === 'recording'} onClick={handleShowQR}>MOSTRA QR CODE</Button>
         )}
-        <button onClick={handleManual} style={{ background: 'none', border: 'none', fontFamily: 'var(--pixel)', fontSize: 7, color: 'var(--text3)', cursor: 'pointer', textAlign: 'center', padding: '4px', textDecoration: 'underline', lineHeight: 2 }}>
-          SEGNA COME PAGATO MANUALMENTE
-        </button>
-        <Button variant="ghost" onClick={onClose} style={{ color: 'var(--text3)', borderColor: 'var(--text3)' }}>ANNULLA</Button>
+        {status !== 'pending' && status !== 'recording' && status !== 'resolving' && <button onClick={handleManual} style={{ background: 'none', border: 'none', fontFamily: 'var(--pixel)', fontSize: 7, color: 'var(--text3)', cursor: 'pointer', textAlign: 'center', padding: '4px', textDecoration: 'underline', lineHeight: 2 }}>
+          {sent ? 'RIPROVA REGISTRAZIONE (NON RIPAGARE)' : status === 'qr' ? 'HO PAGATO CON QR: CHIEDI CONFERMA' : 'DICHIARA PAGAMENTO MANUALE'}
+        </button>}
+        <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)', lineHeight: 1.5 }}>
+          Le dichiarazioni non riducono i debiti. Solo una conferma firmata dal destinatario aggiorna il saldo. Controlla sempre il wallet prima di dichiarare un pagamento.
+        </div>
+        <Button variant="ghost" disabled={status === 'resolving' || status === 'recording'} onClick={onClose} style={{ color: 'var(--text3)', borderColor: 'var(--text3)' }}>{status === 'pending' ? 'CHIUDI' : 'ANNULLA'}</Button>
       </div>
     </ModalShell>
   )
