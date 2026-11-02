@@ -1,5 +1,4 @@
 import { simplifyDebts } from '../lib/balances'
-import { approvedSettlements } from '../lib/settlement-status'
 import { Avatar, SectionHeader, Button, Empty } from '../components/ui'
 
 const sats = (n) => Number(n).toLocaleString() + ' sat'
@@ -25,7 +24,7 @@ export default function GroupsView({ groups, myPubkey, profiles, onSelectGroup, 
       )}
 
       {groups.map(g => {
-        const debts    = simplifyDebts(g.expenses || [], approvedSettlements(g.settlements || [], g.confirmations || []), g.members || [])
+        const debts    = simplifyDebts(g.expenses || [], g.settlements || [], g.members || [])
         const iOwe     = debts.filter(d => d.from === myPubkey).reduce((s, d) => s + d.amount, 0)
         const owedToMe = debts.filter(d => d.to   === myPubkey).reduce((s, d) => s + d.amount, 0)
         const net      = owedToMe - iOwe

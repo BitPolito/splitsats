@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useStore } from './store'
 import { Toast } from './components/ui'
 
@@ -20,15 +20,10 @@ export default function App() {
   const relayStatus      = useStore(s => s.relayStatus)
   const clearToast       = useStore(s => s.clearToast)
   const login            = useStore(s => s.login)
-  const initSession      = useStore(s => s.initSession)
   const loading          = useStore(s => s.loading)
   const createGroup      = useStore(s => s.createGroup)
   const addExpense       = useStore(s => s.addExpense)
   const recordSettlement = useStore(s => s.recordSettlement)
-  const confirmSettlement = useStore(s => s.confirmSettlement)
-
-  // Restore relay subscriptions when a cached session is loaded after a refresh.
-  useEffect(() => { if (pubkey) initSession(pubkey) }, [pubkey, initSession])
 
   const [tab,           setTab]           = useState('groups')
   const [selectedGroup, setSelectedGroup] = useState(null)
@@ -81,7 +76,6 @@ export default function App() {
           onBack={() => setSelectedGroup(null)}
           onAddExpense={() => setModal('addExpense')}
           onSettle={(debt) => { setSettleDebt(debt); setModal('settle') }}
-          onConfirmSettlement={(settlementId) => confirmSettlement(liveGroup.id, settlementId)}
         />
       ) : (
         <>

@@ -16,35 +16,15 @@ export default function AddExpenseModal({ group, myPubkey, profiles, onConfirm, 
   const [paidBy,      setPaidBy] = useState(myPubkey)
   const [category,    setCat]    = useState('other')
   const [splitType,   setSplit]  = useState('equal')
-  const [submitting, setSubmitting] = useState(false)
-  const [publishError, setPublishError] = useState('')
-  const [deliveryUncertain, setDeliveryUncertain] = useState(false)
   const [included,    setIncl]   = useState(() =>
     Object.fromEntries(group.members.map(m => [m, true]))
   )
 
   const splitMembers = splitType === 'equal' ? group.members : group.members.filter(m => included[m])
-  const amountSats   = Number(amount)
-  const validAmount  = Number.isSafeInteger(amountSats) && amountSats > 0
-  const minShare     = validAmount && splitMembers.length ? Math.floor(amountSats / splitMembers.length) : 0
-  const maxShare     = validAmount && splitMembers.length ? Math.ceil(amountSats / splitMembers.length) : 0
-  const shareLabel  = minShare === maxShare
-    ? `${minShare.toLocaleString()} SAT / PERSONA`
-    : `${minShare.toLocaleString()}–${maxShare.toLocaleString()} SAT / PERSONA`
-
-  const handleAdd = async () => {
-    if (submitting) return
-    setSubmitting(true); setPublishError('')
-    try { await onConfirm({ description, amount: amountSats, paidBy, category, splits: splitMembers }) }
-    catch (error) {
-      if (error.code === 'RELAY_PUBLICATION_UNKNOWN') setDeliveryUncertain(true)
-      setPublishError(error.message || 'Pubblicazione non riuscita')
-    }
-    finally { setSubmitting(false) }
-  }
+  const perPerson    = splitMembers.length ? Math.round(parseInt(amount || 0) / splitMembers.length) : 0
 
   return (
-    <ModalShell onClose={submitting ? () => {} : onClose}>
+    <ModalShell onClose={onClose}>
       <div style={{ fontFamily: 'var(--pixel)', fontSize: 11, color: 'var(--blue)' }}>ADD EXPENSE</div>
 
       <FormGroup label="DESCRIZIONE">
@@ -106,21 +86,18 @@ export default function AddExpenseModal({ group, myPubkey, profiles, onConfirm, 
           })}
           {amount && (
             <div style={{ padding: '8px 12px', fontFamily: 'var(--pixel)', fontSize: 7, color: 'var(--blue)', borderTop: '1px solid var(--blue)', background: 'var(--blue-bg)' }}>
-              {shareLabel}
+              {perPerson.toLocaleString()} SAT / PERSONA
             </div>
           )}
         </div>
       )}
 
-      {publishError && <div role="alert" style={{ fontFamily: 'var(--pixel)', fontSize: 7, color: 'var(--red)', lineHeight: 2 }}>
-        {publishError}
-        {deliveryUncertain && <div>Chiudi, verifica se l'evento e' apparso nel gruppo dopo la sincronizzazione, poi decidi se riprovare.</div>}
-      </div>}
-      <Button variant="primary" disabled={submitting || deliveryUncertain || !description.trim() || !validAmount || !splitMembers.length}
-        onClick={handleAdd}>
-        {submitting ? 'PUBBLICAZIONE...' : '⚡ ADD EXPENSE'}
+      <Button variant="primary" disabled={!description.trim() || !parseInt(amount)} onClick={() =>
+        onConfirm({ description, amount: parseInt(amount), paidBy, category, splits: splitMembers })
+      }>
+        ⚡ ADD EXPENSE
       </Button>
-      <Button variant="ghost" disabled={submitting} onClick={onClose}>ANNULLA</Button>
+      <Button variant="ghost" onClick={onClose}>ANNULLA</Button>
     </ModalShell>
   )
 }
