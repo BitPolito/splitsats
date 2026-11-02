@@ -1,6 +1,8 @@
 import { verifyEvent } from 'nostr-tools'
 import { nip19 } from 'nostr-tools'
 import { RELAYS } from './constants'
+import { RelayPool } from './relay-pool'
+import { parseGroupEvent, parseExpenseEvent, parseSettlementEvent, parseConfirmationEvent } from './event-validation'
 
 // ─── npub ↔ hex conversion ────────────────────────────────────────────────────
 // Nostr relays always use hex pubkeys. npub is only a display format.
@@ -30,87 +32,9 @@ export function isValidPubkey(input) {
   return /^[0-9a-f]{64}$/.test(input)
 }
 
-// ─── RelayPool ────────────────────────────────────────────────────────────────
-
-class RelayPool {
-  constructor() {
-    this._sockets = {}
-    this._subs    = {}
-    this._seen    = new Set()
-    this._queue   = {}
-    this._retries = {}
-  }
-
-  connect(url) {
-    if (this._sockets[url]?.readyState === WebSocket.OPEN) return
-    this._queue[url] = this._queue[url] || []
-    const ws = new WebSocket(url)
-    this._sockets[url] = ws
-
-    ws.onopen = () => {
-      this._retries[url] = 0
-      ;(this._queue[url] || []).forEach(m => ws.send(m))
-      this._queue[url] = []
-      Object.entries(this._subs).forEach(([id, sub]) => {
-        ws.send(JSON.stringify(['REQ', id, ...sub.filters]))
-      })
-    }
-
-    ws.onmessage = (e) => {
-      try {
-        const msg = JSON.parse(e.data)
-        if (msg[0] === 'EVENT') {
-          const [, subId, event] = msg
-          if (!event?.id || this._seen.has(event.id)) return
-          try { if (!verifyEvent(event)) return } catch { return }
-          this._seen.add(event.id)
-          this._subs[subId]?.onEvent(event)
-        } else if (msg[0] === 'EOSE') {
-          const sub = this._subs[msg[1]]
-          if (sub) {
-            sub.eoseCount = (sub.eoseCount || 0) + 1
-            if (sub.eoseCount >= Object.keys(this._sockets).length) sub.onEose?.()
-          }
-        }
-      } catch {}
-    }
-
-    ws.onerror = () => {}
-    ws.onclose = () => {
-      const r = this._retries[url] || 0
-      this._retries[url] = r + 1
-      setTimeout(() => this.connect(url), Math.min(1000 * 2 ** r, 30000))
-    }
-  }
-
-  _send(msg) {
-    const raw = JSON.stringify(msg)
-    Object.entries(this._sockets).forEach(([url, ws]) => {
-      if (ws.readyState === WebSocket.OPEN) ws.send(raw)
-      else { this._queue[url] = this._queue[url] || []; this._queue[url].push(raw) }
-    })
-  }
-
-  publish(event) { this._send(['EVENT', event]) }
-
-  subscribe({ id, filters, onEvent, onEose }) {
-    const subId = id || Math.random().toString(36).slice(2)
-    this._subs[subId] = { filters, onEvent, onEose, eoseCount: 0 }
-    this._send(['REQ', subId, ...filters])
-    return () => this.unsubscribe(subId)
-  }
-
-  unsubscribe(subId) {
-    delete this._subs[subId]
-    this._send(['CLOSE', subId])
-  }
-
-  get connectedCount() {
-    return Object.values(this._sockets).filter(ws => ws.readyState === WebSocket.OPEN).length
-  }
-}
-
-export const pool = new RelayPool()
+// A relay acknowledging an event (NIP-20 OK) is required before we show
+// an optimistic local mutation. Subscriptions retry after reconnect.
+export const pool = new RelayPool({ verifyEvent })
 RELAYS.forEach(r => pool.connect(r))
 
 // ─── Publish ──────────────────────────────────────────────────────────────────
@@ -124,7 +48,12 @@ export async function publishEvent(pubkey, kind, content, tags = []) {
     content: typeof content === 'string' ? content : JSON.stringify(content),
   }
   const signed = await window.nostr.signEvent(event)
-  pool.publish(signed)
+  // Do not publish a forged event if the browser's NIP-07 account changed.
+  if (signed.pubkey !== pubkey || signed.kind !== kind || signed.content !== event.content ||
+      JSON.stringify(signed.tags) !== JSON.stringify(tags) || !verifyEvent(signed)) {
+    throw new Error('Firma Nostr non valida o account del signer cambiato')
+  }
+  await pool.publish(signed)
   return signed
 }
 
@@ -134,8 +63,6 @@ export function fetchProfile(hexPubkey, onProfile) {
   // Unsubscribe any existing profile sub for this key, then re-subscribe
   // This forces a fresh fetch even if the event was already seen
   pool.unsubscribe('profile_' + hexPubkey)
-  // Remove cached seen state for events from this author so dedup doesn't block
-  pool._seen = new Set([...pool._seen].filter(id => id !== hexPubkey))
   return pool.subscribe({
     id:      'profile_' + hexPubkey,
     filters: [{ kinds: [0], authors: [hexPubkey], limit: 1 }],
@@ -153,29 +80,25 @@ export function fetchGroups(hexPubkey, onGroup, onDone) {
   const checkDone = () => { if (++eoseCount >= 2) onDone?.() }
 
   const handleGroupEvent = (event) => {
-    try {
-      const data    = JSON.parse(event.content)
-      const dTag    = event.tags.find(t => t[0] === 'd')?.[1]
-      if (!dTag) return
-      // Ensure members are always stored as hex
-      const members = (data.members || []).map(npubToHex)
-      onGroup({ ...data, members, id: dTag, pubkey: event.pubkey, eventId: event.id })
-    } catch {}
+    const group = parseGroupEvent(event, hexPubkey, npubToHex)
+    if (group) onGroup(group)
   }
 
-  pool.subscribe({
+  const unsubAuthored = pool.subscribe({
     id:      'groups_authored_' + hexPubkey,
     filters: [{ kinds: [30001], authors: [hexPubkey], '#t': ['splitsats'], limit: 200 }],
     onEvent: handleGroupEvent,
     onEose:  checkDone,
   })
 
-  pool.subscribe({
+  const unsubMember = pool.subscribe({
     id:      'groups_member_' + hexPubkey,
     filters: [{ kinds: [30001], '#p': [hexPubkey], '#t': ['splitsats'], limit: 200 }],
     onEvent: handleGroupEvent,
     onEose:  checkDone,
   })
+
+  return () => { unsubAuthored(); unsubMember() }
 }
 
 // ─── Expenses ─────────────────────────────────────────────────────────────────
@@ -185,10 +108,8 @@ export function subscribeExpenses(groupId, hexMembers, onExpense, onEose) {
     id:      'expenses_' + groupId,
     filters: [{ kinds: [9000], authors: hexMembers, '#g': [groupId], limit: 500 }],
     onEvent: (event) => {
-      try {
-        const data = JSON.parse(event.content)
-        onExpense({ ...data, _eventId: event.id, _pubkey: event.pubkey })
-      } catch {}
+      const expense = parseExpenseEvent(event, { id: groupId, members: hexMembers })
+      if (expense) onExpense(expense)
     },
     onEose,
   })
@@ -201,10 +122,20 @@ export function subscribeSettlements(groupId, hexMembers, onSettlement, onEose) 
     id:      'settlements_' + groupId,
     filters: [{ kinds: [9001], authors: hexMembers, '#g': [groupId], limit: 200 }],
     onEvent: (event) => {
-      try {
-        const data = JSON.parse(event.content)
-        onSettlement({ ...data, _eventId: event.id })
-      } catch {}
+      const settlement = parseSettlementEvent(event, { id: groupId, members: hexMembers })
+      if (settlement) onSettlement(settlement)
+    },
+    onEose,
+  })
+}
+// ─── Recipient-signed payment confirmations ─────────────────────────────────
+export function subscribeConfirmations(groupId, hexMembers, onConfirmation, onEose) {
+  return pool.subscribe({
+    id:      'confirmations_' + groupId,
+    filters: [{ kinds: [9002], authors: hexMembers, '#g': [groupId], limit: 200 }],
+    onEvent: event => {
+      const confirmation = parseConfirmationEvent(event, { id: groupId, members: hexMembers })
+      if (confirmation) onConfirmation(confirmation)
     },
     onEose,
   })
