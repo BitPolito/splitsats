@@ -21,7 +21,13 @@ export default function AddExpenseModal({ group, myPubkey, profiles, onConfirm, 
   )
 
   const splitMembers = splitType === 'equal' ? group.members : group.members.filter(m => included[m])
-  const perPerson    = splitMembers.length ? Math.round(parseInt(amount || 0) / splitMembers.length) : 0
+  const amountSats   = Number(amount)
+  const validAmount  = Number.isSafeInteger(amountSats) && amountSats > 0
+  const minShare     = validAmount && splitMembers.length ? Math.floor(amountSats / splitMembers.length) : 0
+  const maxShare     = validAmount && splitMembers.length ? Math.ceil(amountSats / splitMembers.length) : 0
+  const shareLabel  = minShare === maxShare
+    ? `${minShare.toLocaleString()} SAT / PERSONA`
+    : `${minShare.toLocaleString()}–${maxShare.toLocaleString()} SAT / PERSONA`
 
   return (
     <ModalShell onClose={onClose}>
@@ -86,14 +92,14 @@ export default function AddExpenseModal({ group, myPubkey, profiles, onConfirm, 
           })}
           {amount && (
             <div style={{ padding: '8px 12px', fontFamily: 'var(--pixel)', fontSize: 7, color: 'var(--blue)', borderTop: '1px solid var(--blue)', background: 'var(--blue-bg)' }}>
-              {perPerson.toLocaleString()} SAT / PERSONA
+              {shareLabel}
             </div>
           )}
         </div>
       )}
 
-      <Button variant="primary" disabled={!description.trim() || !parseInt(amount)} onClick={() =>
-        onConfirm({ description, amount: parseInt(amount), paidBy, category, splits: splitMembers })
+      <Button variant="primary" disabled={!description.trim() || !validAmount || !splitMembers.length} onClick={() =>
+        onConfirm({ description, amount: amountSats, paidBy, category, splits: splitMembers })
       }>
         ⚡ ADD EXPENSE
       </Button>

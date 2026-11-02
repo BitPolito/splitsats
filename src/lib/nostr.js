@@ -61,9 +61,11 @@ class RelayPool {
         const msg = JSON.parse(e.data)
         if (msg[0] === 'EVENT') {
           const [, subId, event] = msg
-          if (!event?.id || this._seen.has(event.id)) return
+          if (!event?.id || !this._subs[subId]) return
+          const seenKey = `${subId}:${event.id}`
+          if (this._seen.has(seenKey)) return
           try { if (!verifyEvent(event)) return } catch { return }
-          this._seen.add(event.id)
+          this._seen.add(seenKey)
           this._subs[subId]?.onEvent(event)
         } else if (msg[0] === 'EOSE') {
           const sub = this._subs[msg[1]]
@@ -102,6 +104,10 @@ class RelayPool {
 
   unsubscribe(subId) {
     delete this._subs[subId]
+    // Forget this subscription's IDs so a subsequent profile refresh can replay them.
+    for (const seenKey of this._seen) {
+      if (seenKey.startsWith(`${subId}:`)) this._seen.delete(seenKey)
+    }
     this._send(['CLOSE', subId])
   }
 
@@ -134,8 +140,6 @@ export function fetchProfile(hexPubkey, onProfile) {
   // Unsubscribe any existing profile sub for this key, then re-subscribe
   // This forces a fresh fetch even if the event was already seen
   pool.unsubscribe('profile_' + hexPubkey)
-  // Remove cached seen state for events from this author so dedup doesn't block
-  pool._seen = new Set([...pool._seen].filter(id => id !== hexPubkey))
   return pool.subscribe({
     id:      'profile_' + hexPubkey,
     filters: [{ kinds: [0], authors: [hexPubkey], limit: 1 }],
@@ -163,19 +167,21 @@ export function fetchGroups(hexPubkey, onGroup, onDone) {
     } catch {}
   }
 
-  pool.subscribe({
+  const unsubAuthored = pool.subscribe({
     id:      'groups_authored_' + hexPubkey,
     filters: [{ kinds: [30001], authors: [hexPubkey], '#t': ['splitsats'], limit: 200 }],
     onEvent: handleGroupEvent,
     onEose:  checkDone,
   })
 
-  pool.subscribe({
+  const unsubMember = pool.subscribe({
     id:      'groups_member_' + hexPubkey,
     filters: [{ kinds: [30001], '#p': [hexPubkey], '#t': ['splitsats'], limit: 200 }],
     onEvent: handleGroupEvent,
     onEose:  checkDone,
   })
+
+  return () => { unsubAuthored(); unsubMember() }
 }
 
 // ─── Expenses ─────────────────────────────────────────────────────────────────

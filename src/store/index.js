@@ -7,6 +7,13 @@ const randId = () => Math.random().toString(36).slice(2, 10)
 const now    = () => Math.floor(Date.now() / 1000)
 
 const activeSubs = {}
+let currentSessionPubkey = null
+
+function stopActiveSubscriptions() {
+  Object.values(activeSubs).forEach(unsub => { try { unsub() } catch {} })
+  Object.keys(activeSubs).forEach(key => delete activeSubs[key])
+  currentSessionPubkey = null
+}
 
 export const useStore = create((set, get) => ({
   pubkey:      loadPubkey(),   // always hex
@@ -28,15 +35,13 @@ export const useStore = create((set, get) => ({
       const pubkey = await window.nostr.getPublicKey()
       savePubkey(pubkey)
       set({ pubkey, loading: false })
-      get().initSession(pubkey)
     } catch (e) {
       set({ error: e.message, loading: false })
     }
   },
 
   logout: () => {
-    Object.values(activeSubs).forEach(unsub => { try { unsub() } catch {} })
-    Object.keys(activeSubs).forEach(k => delete activeSubs[k])
+    stopActiveSubscriptions()
     clearAll()
     set({ pubkey: null, groups: [], profiles: {}, error: null })
   },
@@ -44,6 +49,10 @@ export const useStore = create((set, get) => ({
   // ─── SESSION INIT ──────────────────────────────────────────────────────────
 
   initSession: (pubkey) => {
+    // React StrictMode may invoke the effect twice; never open duplicate subscriptions.
+    if (!pubkey || currentSessionPubkey === pubkey) return
+    stopActiveSubscriptions()
+    currentSessionPubkey = pubkey
     get().fetchAndCacheProfile(pubkey)
 
     // Relay status
@@ -63,7 +72,7 @@ export const useStore = create((set, get) => ({
     // Then fetch from relay — may return new groups or updates
     const seenGroupIds = new Set(cachedGroups.map(g => g.id))
 
-    fetchGroups(
+    activeSubs['_groups'] = fetchGroups(
       pubkey,
       (groupData) => {
         const alreadyCached = seenGroupIds.has(groupData.id)
@@ -129,7 +138,9 @@ export const useStore = create((set, get) => ({
         set(s => {
           const groups = s.groups.map(g => {
             if (g.id !== groupId) return g
-            if ((g.settlements || []).find(s => s._eventId === settlement._eventId)) return g
+            if ((g.settlements || []).some(s =>
+              s._eventId === settlement._eventId || (s.id && settlement.id && s.id === settlement.id)
+            )) return g
             return { ...g, settlements: [...(g.settlements || []), settlement] }
           })
           saveGroups(groups)
@@ -145,9 +156,13 @@ export const useStore = create((set, get) => ({
 
   // ─── PROFILES ──────────────────────────────────────────────────────────────
 
-  fetchAndCacheProfile: (hexPubkey) => {
-    const cached = get().profiles[hexPubkey]; if (!hexPubkey || (cached && (cached.name || cached.display_name || cached.lud16))) return
-    fetchProfile(hexPubkey, (pk, meta) => {
+  fetchAndCacheProfile: (hexPubkey, force = false) => {
+    if (!hexPubkey) return
+    const cached = get().profiles[hexPubkey]
+    if (!force && cached && (cached.name || cached.display_name || cached.lud16)) return
+    const subKey = 'profile_' + hexPubkey
+    activeSubs[subKey]?.()
+    activeSubs[subKey] = fetchProfile(hexPubkey, (pk, meta) => {
       set(s => {
         const updated = { ...s.profiles, [pk]: meta }
         saveProfiles(updated)
@@ -191,16 +206,19 @@ export const useStore = create((set, get) => ({
 
     const expenseData = { ...expense, id: randId(), createdAt: now() }
 
-    await publishEvent(pubkey, KIND_EXPENSE, expenseData, [
+    const signed = await publishEvent(pubkey, KIND_EXPENSE, expenseData, [
       ['g', groupId],
       ['t', 'splitsats'],
       ...group.members.map(m => ['p', m]),
     ])
 
+    const localExpense = { ...expenseData, _eventId: signed.id, _pubkey: pubkey }
     set(s => {
-      const groups = s.groups.map(g =>
-        g.id === groupId ? { ...g, expenses: [...g.expenses, expenseData] } : g
-      )
+      const groups = s.groups.map(g => {
+        if (g.id !== groupId) return g
+        if (g.expenses.some(e => e.id === expenseData.id || e._eventId === signed.id)) return g
+        return { ...g, expenses: [...g.expenses, localExpense] }
+      })
       saveGroups(groups)
       return { groups, toast: `"${expense.description}" — ${expense.amount.toLocaleString()} sats` }
     })
@@ -210,20 +228,22 @@ export const useStore = create((set, get) => ({
 
   recordSettlement: async (groupId, { from, to, amount }) => {
     const { pubkey } = get()
-    const data = { from, to, amount, settledAt: now() }
+    const data = { id: randId(), from, to, amount, settledAt: now() }
 
-    await publishEvent(pubkey, KIND_SETTLEMENT, data, [
+    const signed = await publishEvent(pubkey, KIND_SETTLEMENT, data, [
       ['g', groupId],
       ['p', to],
       ['t', 'splitsats'],
     ])
 
+    const localSettlement = { ...data, _eventId: signed.id }
     set(s => {
-      const groups = s.groups.map(g =>
-        g.id === groupId
-          ? { ...g, settlements: [...(g.settlements || []), data] }
-          : g
-      )
+      const groups = s.groups.map(g => {
+        if (g.id !== groupId) return g
+        const settlements = g.settlements || []
+        if (settlements.some(s => s._eventId === signed.id || s.id === data.id)) return g
+        return { ...g, settlements: [...settlements, localSettlement] }
+      })
       saveGroups(groups)
       return { groups, toast: `Pagamento di ${amount.toLocaleString()} sats registrato` }
     })

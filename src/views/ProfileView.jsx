@@ -12,7 +12,7 @@ export default function ProfileView({ myPubkey, profiles }) {
   // Ogni volta che si apre la pagina profilo, ri-fetcha sempre il proprio profilo
   useEffect(() => {
     if (myPubkey) fetchAndCacheProfile(myPubkey, true)
-  }, [myPubkey])
+  }, [myPubkey, fetchAndCacheProfile])
 
   const rows = [
     ['RELAY',      `${RELAYS.length} RELAY PUBBLICI`],
