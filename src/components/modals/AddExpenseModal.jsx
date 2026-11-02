@@ -16,6 +16,9 @@ export default function AddExpenseModal({ group, myPubkey, profiles, onConfirm, 
   const [paidBy,      setPaidBy] = useState(myPubkey)
   const [category,    setCat]    = useState('other')
   const [splitType,   setSplit]  = useState('equal')
+  const [submitting, setSubmitting] = useState(false)
+  const [publishError, setPublishError] = useState('')
+  const [deliveryUncertain, setDeliveryUncertain] = useState(false)
   const [included,    setIncl]   = useState(() =>
     Object.fromEntries(group.members.map(m => [m, true]))
   )
@@ -29,8 +32,19 @@ export default function AddExpenseModal({ group, myPubkey, profiles, onConfirm, 
     ? `${minShare.toLocaleString()} SAT / PERSONA`
     : `${minShare.toLocaleString()}–${maxShare.toLocaleString()} SAT / PERSONA`
 
+  const handleAdd = async () => {
+    if (submitting) return
+    setSubmitting(true); setPublishError('')
+    try { await onConfirm({ description, amount: amountSats, paidBy, category, splits: splitMembers }) }
+    catch (error) {
+      if (error.code === 'RELAY_PUBLICATION_UNKNOWN') setDeliveryUncertain(true)
+      setPublishError(error.message || 'Pubblicazione non riuscita')
+    }
+    finally { setSubmitting(false) }
+  }
+
   return (
-    <ModalShell onClose={onClose}>
+    <ModalShell onClose={submitting ? () => {} : onClose}>
       <div style={{ fontFamily: 'var(--pixel)', fontSize: 11, color: 'var(--blue)' }}>ADD EXPENSE</div>
 
       <FormGroup label="DESCRIZIONE">
@@ -98,12 +112,15 @@ export default function AddExpenseModal({ group, myPubkey, profiles, onConfirm, 
         </div>
       )}
 
-      <Button variant="primary" disabled={!description.trim() || !validAmount || !splitMembers.length} onClick={() =>
-        onConfirm({ description, amount: amountSats, paidBy, category, splits: splitMembers })
-      }>
-        ⚡ ADD EXPENSE
+      {publishError && <div role="alert" style={{ fontFamily: 'var(--pixel)', fontSize: 7, color: 'var(--red)', lineHeight: 2 }}>
+        {publishError}
+        {deliveryUncertain && <div>Chiudi, verifica se l'evento e' apparso nel gruppo dopo la sincronizzazione, poi decidi se riprovare.</div>}
+      </div>}
+      <Button variant="primary" disabled={submitting || deliveryUncertain || !description.trim() || !validAmount || !splitMembers.length}
+        onClick={handleAdd}>
+        {submitting ? 'PUBBLICAZIONE...' : '⚡ ADD EXPENSE'}
       </Button>
-      <Button variant="ghost" onClick={onClose}>ANNULLA</Button>
+      <Button variant="ghost" disabled={submitting} onClick={onClose}>ANNULLA</Button>
     </ModalShell>
   )
 }

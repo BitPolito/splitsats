@@ -29,6 +29,7 @@ export default function SettleModal({ debt, profiles, groupId, onClose, onSettle
   const [invoice, setInvoice] = useState('')
   const [copied,  setCopied]  = useState(false)
   const [sent, setSent] = useState(false)
+  const [deliveryUncertain, setDeliveryUncertain] = useState(false)
 
   const toProfile = profiles[debt.to] || {}
   const toName    = toProfile.name || truncate(debt.to, 8)
@@ -49,6 +50,7 @@ export default function SettleModal({ debt, profiles, groupId, onClose, onSettle
         method: 'webln', walletReported: true })
       setStatus('pending')
     } catch (e) {
+      if (e.code === 'RELAY_PUBLICATION_UNKNOWN') setDeliveryUncertain(true)
       setErrMsg((walletCompleted ? 'Il wallet ha segnalato il pagamento, ma non siamo riusciti a pubblicare la richiesta. NON pagare di nuovo. ' :
         'Se il wallet ha avviato un pagamento, controlla la sua cronologia prima di riprovare. ') + (e.message || 'Errore'))
       setStatus('error')
@@ -74,7 +76,10 @@ export default function SettleModal({ debt, profiles, groupId, onClose, onSettle
       await onSettled(groupId, { from: debt.from, to: debt.to, amount: debt.amount,
         method: sent ? 'webln' : 'manual', walletReported: sent })
       setStatus('pending')
-    } catch (e) { setErrMsg(e.message || 'Impossibile registrare la richiesta'); setStatus('error') }
+    } catch (e) {
+      if (e.code === 'RELAY_PUBLICATION_UNKNOWN') setDeliveryUncertain(true)
+      setErrMsg(e.message || 'Impossibile registrare la richiesta'); setStatus('error')
+    }
   }
 
   return (
@@ -116,6 +121,8 @@ export default function SettleModal({ debt, profiles, groupId, onClose, onSettle
       {status === 'recording' && <div style={{ textAlign: 'center', fontFamily: 'var(--pixel)', fontSize: 8 }}>SALVATAGGIO SU NOSTR...</div>}
       {status === 'error'     && <div style={{ fontFamily: 'var(--pixel)', fontSize: 8, color: 'var(--red)', border: '2px solid var(--red)', padding: '10px', textAlign: 'center', lineHeight: 2 }}>{errMsg}</div>}
 
+      {deliveryUncertain && <div style={{ fontFamily: 'var(--pixel)', fontSize: 7, color: 'var(--red)', lineHeight: 2 }}>Esito della pubblicazione incerto. Controlla la cronologia dopo una nuova sincronizzazione; non ripagare e non inviare una seconda dichiarazione ora.</div>}
+
       {!webln && status !== 'qr' && status !== 'pending' && (
         <div style={{ border: '2px solid var(--blue)', padding: '10px 14px', fontFamily: 'var(--pixel)', fontSize: 7, color: 'var(--text2)', lineHeight: 2, background: 'var(--blue-bg)' }}>
           ALBY NON TROVATO — USA IL QR CODE PER PAGARE.
@@ -124,14 +131,14 @@ export default function SettleModal({ debt, profiles, groupId, onClose, onSettle
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {status !== 'qr' && status !== 'pending' && (
-          <Button variant="primary" disabled={!webln || !lnAddress || sent || status === 'resolving' || status === 'recording'} onClick={handlePay}>
+          <Button variant="primary" disabled={!webln || !lnAddress || sent || deliveryUncertain || status === 'resolving' || status === 'recording'} onClick={handlePay}>
             {status === 'resolving' ? '// CONNECTING...' : '> PAY WITH ALBY'}
           </Button>
         )}
-        {lnAddress && !sent && status !== 'qr' && status !== 'pending' && (
+        {lnAddress && !sent && !deliveryUncertain && status !== 'qr' && status !== 'pending' && (
           <Button variant="ghost" disabled={status === 'resolving' || status === 'recording'} onClick={handleShowQR}>MOSTRA QR CODE</Button>
         )}
-        {status !== 'pending' && status !== 'recording' && status !== 'resolving' && <button onClick={handleManual} style={{ background: 'none', border: 'none', fontFamily: 'var(--pixel)', fontSize: 7, color: 'var(--text3)', cursor: 'pointer', textAlign: 'center', padding: '4px', textDecoration: 'underline', lineHeight: 2 }}>
+        {!deliveryUncertain && status !== 'pending' && status !== 'recording' && status !== 'resolving' && <button onClick={handleManual} style={{ background: 'none', border: 'none', fontFamily: 'var(--pixel)', fontSize: 7, color: 'var(--text3)', cursor: 'pointer', textAlign: 'center', padding: '4px', textDecoration: 'underline', lineHeight: 2 }}>
           {sent ? 'RIPROVA REGISTRAZIONE (NON RIPAGARE)' : status === 'qr' ? 'HO PAGATO CON QR: CHIEDI CONFERMA' : 'DICHIARA PAGAMENTO MANUALE'}
         </button>}
         <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)', lineHeight: 1.5 }}>
