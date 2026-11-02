@@ -1,19 +1,31 @@
 import { create } from 'zustand'
-import { loadGroups, saveGroups, loadProfiles, saveProfiles, loadPubkey, savePubkey, clearAll } from '../lib/storage'
-import { publishEvent, fetchProfile, fetchGroups, subscribeExpenses, subscribeSettlements, pool, npubToHex } from '../lib/nostr'
-import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT } from '../lib/constants'
+import { loadGroups, saveGroups, loadProfiles, saveProfiles, loadPubkey, savePubkey, clearAll, clearPubkey } from '../lib/storage'
+import { verifyCachedSigner } from '../lib/session-identity'
+import { publishEvent, fetchProfile, fetchGroups, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
+import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION } from '../lib/constants'
+import { isNewerGroupDefinition, validPubkey } from '../lib/event-validation'
+import { isConfirmedSettlement } from '../lib/settlement-status'
 
-const randId = () => Math.random().toString(36).slice(2, 10)
+const randId = () => crypto.randomUUID()
 const now    = () => Math.floor(Date.now() / 1000)
 
 const activeSubs = {}
+const subscribedMemberKeys = {}
+let currentSessionPubkey = null
+
+function stopActiveSubscriptions() {
+  Object.values(activeSubs).forEach(unsub => { try { unsub() } catch {} })
+  Object.keys(activeSubs).forEach(key => delete activeSubs[key])
+  Object.keys(subscribedMemberKeys).forEach(key => delete subscribedMemberKeys[key])
+  currentSessionPubkey = null
+}
 
 export const useStore = create((set, get) => ({
-  pubkey:      loadPubkey(),   // always hex
+  pubkey:      null, // cached key is untrusted until checked against NIP-07
   loading:     false,
   error:       null,
-  groups:      loadGroups(),
-  profiles:    loadProfiles(),
+  groups:      [],
+  profiles:    {},
   relayStatus: 0,
   toast:       null,
 
@@ -21,29 +33,46 @@ export const useStore = create((set, get) => ({
 
   // ─── AUTH ──────────────────────────────────────────────────────────────────
 
+  restoreSession: async () => {
+    if (get().pubkey) return
+    const cached = loadPubkey()
+    if (!cached) return
+    const active = await verifyCachedSigner(cached, typeof window !== 'undefined' && window.nostr)
+    // A user might have logged in manually while the signer prompt was open.
+    if (get().pubkey) return
+    if (active) set({ pubkey: active, groups: loadGroups(active), profiles: loadProfiles(active) })
+    else clearPubkey()
+  },
+
   login: async () => {
     set({ loading: true, error: null })
     try {
       // NIP-07 always returns hex pubkey
       const pubkey = await window.nostr.getPublicKey()
+      // Read/migrate legacy cache under its original owner BEFORE switching the hint.
+      const groups = loadGroups(pubkey)
+      const profiles = loadProfiles(pubkey)
+      stopActiveSubscriptions()
       savePubkey(pubkey)
-      set({ pubkey, loading: false })
-      get().initSession(pubkey)
+      set({ pubkey, groups, profiles, loading: false })
     } catch (e) {
       set({ error: e.message, loading: false })
     }
   },
 
   logout: () => {
-    Object.values(activeSubs).forEach(unsub => { try { unsub() } catch {} })
-    Object.keys(activeSubs).forEach(k => delete activeSubs[k])
-    clearAll()
+    stopActiveSubscriptions()
+    clearAll(get().pubkey)
     set({ pubkey: null, groups: [], profiles: {}, error: null })
   },
 
   // ─── SESSION INIT ──────────────────────────────────────────────────────────
 
   initSession: (pubkey) => {
+    // React StrictMode may invoke the effect twice; never open duplicate subscriptions.
+    if (!pubkey || currentSessionPubkey === pubkey) return
+    stopActiveSubscriptions()
+    currentSessionPubkey = pubkey
     get().fetchAndCacheProfile(pubkey)
 
     // Relay status
@@ -54,48 +83,38 @@ export const useStore = create((set, get) => ({
     // FIX: subscribe cached groups immediately on startup (page reload case)
     const cachedGroups = get().groups
     cachedGroups.forEach(g => {
-      if (g.members?.length) {
+      if (g.members?.includes(pubkey)) {
         get().subscribeGroup(g.id, g.members)
         g.members.forEach(m => get().fetchAndCacheProfile(m))
       }
     })
 
-    // Then fetch from relay — may return new groups or updates
-    const seenGroupIds = new Set(cachedGroups.map(g => g.id))
-
-    fetchGroups(
+    // Relay order is not canonical: groups are NIP-33 addressable events.
+    activeSubs['_groups'] = fetchGroups(
       pubkey,
       (groupData) => {
-        const alreadyCached = seenGroupIds.has(groupData.id)
-        seenGroupIds.add(groupData.id)
-
-        if (!alreadyCached) {
-          // New group not in cache
-          const newGroup = { ...groupData, expenses: [], settlements: [], _synced: false }
-          set(s => {
-            const updated = [...s.groups, newGroup]
-            saveGroups(updated)
-            return { groups: updated }
-          })
-          get().subscribeGroup(groupData.id, groupData.members || [pubkey])
-          ;(groupData.members || []).forEach(m => get().fetchAndCacheProfile(m))
-        } else {
-          // Group exists — update metadata (name/members may have changed)
-          set(s => {
-            const groups = s.groups.map(g =>
-              g.id === groupData.id
-                ? { ...g, name: groupData.name, members: groupData.members }
-                : g
-            )
-            saveGroups(groups)
-            return { groups }
-          })
-        }
+        if (currentSessionPubkey !== pubkey) return
+        const existing = get().getGroup(groupData.id)
+        if (!isNewerGroupDefinition(existing, groupData)) return
+        const updatedGroup = existing
+          ? { ...existing, ...groupData, expenses: existing.expenses || [], settlements: existing.settlements || [], confirmations: existing.confirmations || [] }
+          : { ...groupData, expenses: [], settlements: [], confirmations: [], _synced: false }
+        set(s => {
+          const groups = existing
+            ? s.groups.map(g => g.id === groupData.id ? updatedGroup : g)
+            : [...s.groups, updatedGroup]
+          saveGroups(get().pubkey, groups)
+          return { groups }
+        })
+        // Important: membership changes affect which authors are queried.
+        get().subscribeGroup(groupData.id, groupData.members)
+        groupData.members.forEach(m => get().fetchAndCacheProfile(m))
       },
       () => {
+        if (currentSessionPubkey !== pubkey) return
         set(s => {
           const groups = s.groups.map(g => ({ ...g, _synced: true }))
-          saveGroups(groups)
+          saveGroups(get().pubkey, groups)
           return { groups }
         })
       }
@@ -105,18 +124,30 @@ export const useStore = create((set, get) => ({
   // ─── REAL-TIME SUBSCRIPTIONS ───────────────────────────────────────────────
 
   subscribeGroup: (groupId, members) => {
-    if (activeSubs['exp_' + groupId]) return // already subscribed
+    const subscriptionOwner = get().pubkey
+    const memberKey = [...new Set(members)].sort().join(',')
+    if (activeSubs['exp_' + groupId] && subscribedMemberKeys[groupId] === memberKey) return
+    // Close old subscriptions before replacing author filters with the new members.
+    activeSubs['exp_' + groupId]?.()
+    activeSubs['set_' + groupId]?.()
+    activeSubs['conf_' + groupId]?.()
+    subscribedMemberKeys[groupId] = memberKey
 
     const unsubExp = subscribeExpenses(
       groupId, members,
       (expense) => {
+        if (get().pubkey !== subscriptionOwner || currentSessionPubkey !== subscriptionOwner) return
         set(s => {
           const groups = s.groups.map(g => {
             if (g.id !== groupId) return g
-            if (g.expenses.find(e => e.id === expense.id)) return g
+            // A callback from a closed subscription must not admit a removed member.
+            if (!g.members.includes(expense._pubkey) || !g.members.includes(expense.paidBy) ||
+                !expense.splits.every(m => g.members.includes(m))) return g
+            if (g.expenses.some(e => e._eventId === expense._eventId ||
+              (e.id === expense.id && e._pubkey === expense._pubkey))) return g
             return { ...g, expenses: [...g.expenses, expense] }
           })
-          saveGroups(groups)
+          saveGroups(get().pubkey, groups)
           return { groups }
         })
       },
@@ -126,31 +157,63 @@ export const useStore = create((set, get) => ({
     const unsubSet = subscribeSettlements(
       groupId, members,
       (settlement) => {
+        if (get().pubkey !== subscriptionOwner || currentSessionPubkey !== subscriptionOwner) return
         set(s => {
           const groups = s.groups.map(g => {
             if (g.id !== groupId) return g
-            if ((g.settlements || []).find(s => s._eventId === settlement._eventId)) return g
+            if (!g.members.includes(settlement._pubkey) || settlement._pubkey !== settlement.from ||
+                !g.members.includes(settlement.to)) return g
+            if ((g.settlements || []).some(s =>
+              s._eventId === settlement._eventId ||
+              (s.id && settlement.id && s.id === settlement.id && s._pubkey === settlement._pubkey)
+            )) return g
             return { ...g, settlements: [...(g.settlements || []), settlement] }
           })
-          saveGroups(groups)
+          saveGroups(get().pubkey, groups)
           return { groups }
         })
       },
       () => {}
     )
 
+    const unsubConf = subscribeConfirmations(
+      groupId, members,
+      (confirmation) => {
+        if (get().pubkey !== subscriptionOwner || currentSessionPubkey !== subscriptionOwner) return
+        set(s => {
+          const groups = s.groups.map(g => {
+            if (g.id !== groupId || !g.members.includes(confirmation._pubkey) ||
+                !g.members.includes(confirmation.from) || !g.members.includes(confirmation.to)) return g
+            const confirmations = g.confirmations || []
+            if (confirmations.some(c => c._eventId === confirmation._eventId)) return g
+            return { ...g, confirmations: [...confirmations, confirmation] }
+          })
+          saveGroups(get().pubkey, groups)
+          return { groups }
+        })
+      },
+      () => {}
+    )
+
+    activeSubs['conf_' + groupId] = unsubConf
     activeSubs['exp_' + groupId] = unsubExp
     activeSubs['set_' + groupId] = unsubSet
   },
 
   // ─── PROFILES ──────────────────────────────────────────────────────────────
 
-  fetchAndCacheProfile: (hexPubkey) => {
-    const cached = get().profiles[hexPubkey]; if (!hexPubkey || (cached && (cached.name || cached.display_name || cached.lud16))) return
-    fetchProfile(hexPubkey, (pk, meta) => {
+  fetchAndCacheProfile: (hexPubkey, force = false) => {
+    if (!hexPubkey) return
+    const cached = get().profiles[hexPubkey]
+    if (!force && cached && (cached.name || cached.display_name || cached.lud16)) return
+    const subKey = 'profile_' + hexPubkey
+    activeSubs[subKey]?.()
+    const sessionOwner = get().pubkey
+    activeSubs[subKey] = fetchProfile(hexPubkey, (pk, meta) => {
+      if (sessionOwner !== get().pubkey) return
       set(s => {
         const updated = { ...s.profiles, [pk]: meta }
-        saveProfiles(updated)
+        saveProfiles(get().pubkey, updated)
         return { profiles: updated }
       })
     })
@@ -160,20 +223,26 @@ export const useStore = create((set, get) => ({
 
   createGroup: async ({ name, members }) => {
     const { pubkey } = get()
-    // members are already hex (validated in CreateGroupModal)
+    if (!validPubkey(pubkey) || typeof name !== 'string' || !name.trim() || name.length > 100 ||
+        !Array.isArray(members) || members.length < 2 || members.length > 100 ||
+        new Set(members).size !== members.length || !members.every(validPubkey) ||
+        !members.includes(pubkey)) throw new Error('Nome o membri del gruppo non validi')
     const groupId   = randId()
     const groupData = { id: groupId, name, members, createdAt: now() }
 
-    await publishEvent(pubkey, KIND_GROUP, groupData, [
+    const signed = await publishEvent(pubkey, KIND_GROUP, groupData, [
       ['d', groupId],
       ['t', 'splitsats'],
       ...members.map(m => ['p', m]),
     ])
 
-    const newGroup = { ...groupData, expenses: [], settlements: [], _synced: true }
+    if (get().pubkey !== pubkey) return groupId // event accepted for the prior account
+
+    const newGroup = { ...groupData, pubkey, eventId: signed.id,
+      _groupCreatedAt: signed.created_at, expenses: [], settlements: [], confirmations: [], _synced: true }
     set(s => {
       const updated = [...s.groups, newGroup]
-      saveGroups(updated)
+      saveGroups(get().pubkey, updated)
       return { groups: updated, toast: `Gruppo "${name}" creato` }
     })
 
@@ -187,45 +256,108 @@ export const useStore = create((set, get) => ({
   addExpense: async (groupId, expense) => {
     const { pubkey } = get()
     const group      = get().getGroup(groupId)
-    if (!group) return
+    if (!group || !group.members.includes(pubkey)) throw new Error('Non sei membro di questo gruppo')
+    if (!Number.isSafeInteger(expense.amount) || expense.amount <= 0 ||
+        !group.members.includes(expense.paidBy) || !Array.isArray(expense.splits) ||
+        !expense.splits.length || new Set(expense.splits).size !== expense.splits.length ||
+        !expense.splits.every(m => group.members.includes(m)) ||
+        typeof expense.description !== 'string' || !expense.description.trim()) {
+      throw new Error('Dati della spesa non validi')
+    }
 
     const expenseData = { ...expense, id: randId(), createdAt: now() }
 
-    await publishEvent(pubkey, KIND_EXPENSE, expenseData, [
+    const signed = await publishEvent(pubkey, KIND_EXPENSE, expenseData, [
       ['g', groupId],
       ['t', 'splitsats'],
       ...group.members.map(m => ['p', m]),
     ])
 
+    if (get().pubkey !== pubkey) return // keep event associated with its signing account
+
+    const localExpense = { ...expenseData, _eventId: signed.id, _pubkey: pubkey }
     set(s => {
-      const groups = s.groups.map(g =>
-        g.id === groupId ? { ...g, expenses: [...g.expenses, expenseData] } : g
-      )
-      saveGroups(groups)
+      const groups = s.groups.map(g => {
+        if (g.id !== groupId) return g
+        if (g.expenses.some(e => e._eventId === signed.id ||
+          (e.id === expenseData.id && e._pubkey === pubkey))) return g
+        return { ...g, expenses: [...g.expenses, localExpense] }
+      })
+      saveGroups(get().pubkey, groups)
       return { groups, toast: `"${expense.description}" — ${expense.amount.toLocaleString()} sats` }
     })
   },
 
   // ─── SETTLEMENTS ───────────────────────────────────────────────────────────
 
-  recordSettlement: async (groupId, { from, to, amount }) => {
+  recordSettlement: async (groupId, { from, to, amount, method = 'manual', walletReported = false }) => {
     const { pubkey } = get()
-    const data = { from, to, amount, settledAt: now() }
+    const group = get().getGroup(groupId)
+    if (!group || !group.members.includes(from) || !group.members.includes(to) ||
+        from !== pubkey || from === to || !Number.isSafeInteger(amount) || amount <= 0 ||
+        !['manual', 'webln'].includes(method) ||
+        (walletReported && method !== 'webln')) {
+      throw new Error('Puoi dichiarare soltanto i tuoi pagamenti validi')
+    }
+    // A second unresolved claim for the same pair risks an accidental double payment.
+    if ((group.settlements || []).some(s => s.from === from && s.to === to &&
+        !isConfirmedSettlement(s, group.confirmations || []))) {
+      throw new Error('Hai gia un pagamento in attesa di conferma verso questo destinatario')
+    }
+    const data = { id: randId(), from, to, amount, method, walletReported, settledAt: now() }
 
-    await publishEvent(pubkey, KIND_SETTLEMENT, data, [
-      ['g', groupId],
-      ['p', to],
-      ['t', 'splitsats'],
+    const signed = await publishEvent(pubkey, KIND_SETTLEMENT, data, [
+      ['g', groupId], ['p', to], ['t', 'splitsats'],
     ])
 
+    if (get().pubkey !== pubkey) return
+
+    const localSettlement = { ...data, _eventId: signed.id, _pubkey: pubkey }
     set(s => {
-      const groups = s.groups.map(g =>
-        g.id === groupId
-          ? { ...g, settlements: [...(g.settlements || []), data] }
-          : g
-      )
-      saveGroups(groups)
-      return { groups, toast: `Pagamento di ${amount.toLocaleString()} sats registrato` }
+      const groups = s.groups.map(g => {
+        if (g.id !== groupId) return g
+        const settlements = g.settlements || []
+        if (settlements.some(s => s._eventId === signed.id ||
+          (s.id === data.id && s._pubkey === pubkey))) return g
+        return { ...g, settlements: [...settlements, localSettlement] }
+      })
+      saveGroups(get().pubkey, groups)
+      return { groups, toast: 'Richiesta registrata: in attesa di conferma del destinatario' }
+    })
+  },
+
+  // ─── PAYEE CONFIRMATION (independent Nostr signature) ────────────────────
+
+  confirmSettlement: async (groupId, settlementId) => {
+    const { pubkey } = get()
+    const group = get().getGroup(groupId)
+    const settlement = group?.settlements?.find(s => s._eventId === settlementId)
+    if (!group || !settlement || settlement.to !== pubkey ||
+        !group.members.includes(settlement.from) || !group.members.includes(pubkey)) {
+      throw new Error('Solo il destinatario puo confermare questo pagamento')
+    }
+    if (isConfirmedSettlement(settlement, group.confirmations || [])) {
+      throw new Error('Questo pagamento e gia confermato')
+    }
+    const data = {
+      id: randId(), settlementEventId: settlement._eventId,
+      from: settlement.from, to: settlement.to, amount: settlement.amount,
+      confirmedAt: now(),
+    }
+    const signed = await publishEvent(pubkey, KIND_CONFIRMATION, data, [
+      ['g', groupId], ['e', settlement._eventId], ['p', settlement.from], ['t', 'splitsats'],
+    ])
+    if (get().pubkey !== pubkey) return
+    const confirmation = { ...data, _eventId: signed.id, _pubkey: pubkey }
+    set(s => {
+      const groups = s.groups.map(g => {
+        if (g.id !== groupId) return g
+        if ((g.confirmations || []).some(c => c.settlementEventId === settlement._eventId &&
+            c._pubkey === pubkey)) return g
+        return { ...g, confirmations: [...(g.confirmations || []), confirmation] }
+      })
+      saveGroups(get().pubkey, groups)
+      return { groups, toast: 'Ricezione confermata: il saldo e stato aggiornato' }
     })
   },
 
