@@ -69,3 +69,18 @@ La pubblicazione degli eventi attende un ACK `OK` da almeno un relay Nostr. In a
 | 9001  | Dichiarazione di pagamento (in attesa) |
 | 9002  | Conferma del destinatario |
 | 30001 | Definizione gruppo         |
+
+## Recupero eventi pubblicati con esito incerto
+
+Le nuove spese, i gruppi e le dichiarazioni/conferme di pagamento vengono
+salvati come eventi Nostr **già firmati** nell'outbox locale prima della
+pubblicazione. Se nessun relay conferma la ricezione, apri **OUTBOX NOSTR →
+RIPROVA OUTBOX** per reinviare lo stesso evento senza duplicarlo e senza
+ripetere il pagamento Lightning. Consulta [docs/NOSTR-OUTBOX.md](docs/NOSTR-OUTBOX.md).
+
+## Cache per account e sicurezza delle dipendenze
+
+La cache gruppi/profili ora è isolata per chiave Nostr e il ripristino della
+sessione richiede un signer corrispondente. Vedi [cache account](docs/ACCOUNT-CACHE-SECURITY.md).
+L'audit delle dipendenze npm e le istruzioni per gli aggiornamenti sicuri sono
+in [docs/DEPENDENCY-AUDIT.md](docs/DEPENDENCY-AUDIT.md).

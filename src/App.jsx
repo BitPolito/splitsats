@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useStore } from './store'
 import { Toast } from './components/ui'
+import { pendingOutbox, retryOutbox, subscribeOutbox } from './lib/nostr'
 
 import LoginView   from './views/LoginView'
 import GroupsView  from './views/GroupsView'
@@ -21,14 +22,56 @@ export default function App() {
   const clearToast       = useStore(s => s.clearToast)
   const login            = useStore(s => s.login)
   const initSession      = useStore(s => s.initSession)
+  const restoreSession   = useStore(s => s.restoreSession)
   const loading          = useStore(s => s.loading)
   const createGroup      = useStore(s => s.createGroup)
   const addExpense       = useStore(s => s.addExpense)
   const recordSettlement = useStore(s => s.recordSettlement)
   const confirmSettlement = useStore(s => s.confirmSettlement)
 
-  // Restore relay subscriptions when a cached session is loaded after a refresh.
+  // Revalidate the cached identity with the active NIP-07 signer before displaying data.
+  useEffect(() => { restoreSession() }, [restoreSession])
+
+  // Restore relay subscriptions when a verified session is loaded after a refresh.
   useEffect(() => { if (pubkey) initSession(pubkey) }, [pubkey, initSession])
+
+  const [queuedEvents, setQueuedEvents] = useState([])
+  const [queueError, setQueueError] = useState('')
+  const [retrying, setRetrying] = useState(false)
+  const [retryMessage, setRetryMessage] = useState('')
+
+  useEffect(() => {
+    if (!pubkey) { setQueuedEvents([]); setQueueError(''); return }
+    // Avoid displaying another account's previously loaded local queue.
+    setQueuedEvents([])
+    setRetryMessage('')
+    const refresh = () => {
+      try { setQueuedEvents(pendingOutbox(pubkey)); setQueueError('') }
+      catch (error) { setQueuedEvents([]); setQueueError(error.message) }
+    }
+    refresh()
+    const unsubscribe = subscribeOutbox(changedPubkey => {
+      if (changedPubkey === pubkey) refresh()
+    })
+    // Also notice writes from other tabs without sending any event automatically.
+    window.addEventListener('storage', refresh)
+    return () => { unsubscribe(); window.removeEventListener('storage', refresh) }
+  }, [pubkey])
+
+  const handleRetryOutbox = async () => {
+    if (retrying || !pubkey) return
+    setRetrying(true)
+    setRetryMessage('')
+    try {
+      const results = await retryOutbox(pubkey)
+      const ok = results.filter(r => r.ok).length
+      const failed = results.length - ok
+      setRetryMessage(failed
+        ? `${ok} eventi accettati, ${failed} ancora in attesa. Non ripetere l’operazione originale.`
+        : `${ok} eventi accettati dai relay. Verifica la sincronizzazione dei gruppi.`)
+    } catch (error) { setRetryMessage(error.message || 'Errore durante la sincronizzazione') }
+    finally { setRetrying(false) }
+  }
 
   const [tab,           setTab]           = useState('groups')
   const [selectedGroup, setSelectedGroup] = useState(null)
@@ -73,6 +116,29 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      {/* ── Signed outbox: retry existing IDs, never repeat payments ── */}
+      {(queuedEvents.length > 0 || queueError || retryMessage) && (
+        <section role="status" style={{ margin: '10px 16px 0', border: '2px solid var(--blue)', background: 'var(--blue-bg)', padding: 12 }}>
+          <div style={{ fontFamily: 'var(--pixel)', fontSize: 8, lineHeight: 1.8, color: 'var(--blue)' }}>
+            OUTBOX NOSTR — {queuedEvents.length} EVENTI IN ATTESA
+          </div>
+          <div style={{ fontFamily: 'var(--mono)', fontSize: 11, lineHeight: 1.6, color: 'var(--text2)' }}>
+            {queueError || 'Gli eventi sono già firmati e salvati su questo dispositivo. Ritenta solo la pubblicazione, non il pagamento Lightning.'}
+          </div>
+          {queuedEvents.map(({ event }) => (
+            <div key={event.id} style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)', marginTop: 5 }}>
+              Evento {event.kind} · {event.id.slice(0, 12)}…
+            </div>
+          ))}
+          {retryMessage && <div role="alert" style={{ fontFamily: 'var(--mono)', fontSize: 11, marginTop: 8 }}>{retryMessage}</div>}
+          {queuedEvents.length > 0 && !queueError && (
+            <button onClick={handleRetryOutbox} disabled={retrying} style={{ marginTop: 10, border: '2px solid var(--blue)', background: 'var(--blue)', padding: '8px 12px', fontFamily: 'var(--pixel)', fontSize: 7, color: '#fff', cursor: retrying ? 'wait' : 'pointer' }}>
+              {retrying ? 'SINCRONIZZAZIONE...' : 'RIPROVA OUTBOX'}
+            </button>
+          )}
+        </section>
+      )}
 
       {/* ── Group detail or main tabs ── */}
       {liveGroup ? (

@@ -16,7 +16,7 @@ export default function CreateGroupModal({ myPubkey, onConfirm, onClose }) {
     setSubmitting(true); setPublishError('')
     try { await onConfirm({ name: name.trim(), members }) }
     catch (error) {
-      if (error.code === 'RELAY_PUBLICATION_UNKNOWN') setDeliveryUncertain(true)
+      if (['RELAY_PUBLICATION_UNKNOWN', 'OUTBOX_PENDING'].includes(error.code)) setDeliveryUncertain(true)
       setPublishError(error.message || 'Pubblicazione non riuscita')
     }
     finally { setSubmitting(false) }

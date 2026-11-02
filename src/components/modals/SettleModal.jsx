@@ -50,7 +50,7 @@ export default function SettleModal({ debt, profiles, groupId, onClose, onSettle
         method: 'webln', walletReported: true })
       setStatus('pending')
     } catch (e) {
-      if (e.code === 'RELAY_PUBLICATION_UNKNOWN') setDeliveryUncertain(true)
+      if (['RELAY_PUBLICATION_UNKNOWN', 'OUTBOX_PENDING'].includes(e.code)) setDeliveryUncertain(true)
       setErrMsg((walletCompleted ? 'Il wallet ha segnalato il pagamento, ma non siamo riusciti a pubblicare la richiesta. NON pagare di nuovo. ' :
         'Se il wallet ha avviato un pagamento, controlla la sua cronologia prima di riprovare. ') + (e.message || 'Errore'))
       setStatus('error')
@@ -77,7 +77,7 @@ export default function SettleModal({ debt, profiles, groupId, onClose, onSettle
         method: sent ? 'webln' : 'manual', walletReported: sent })
       setStatus('pending')
     } catch (e) {
-      if (e.code === 'RELAY_PUBLICATION_UNKNOWN') setDeliveryUncertain(true)
+      if (['RELAY_PUBLICATION_UNKNOWN', 'OUTBOX_PENDING'].includes(e.code)) setDeliveryUncertain(true)
       setErrMsg(e.message || 'Impossibile registrare la richiesta'); setStatus('error')
     }
   }

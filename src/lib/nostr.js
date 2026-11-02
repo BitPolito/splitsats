@@ -2,6 +2,7 @@ import { verifyEvent } from 'nostr-tools'
 import { nip19 } from 'nostr-tools'
 import { RELAYS } from './constants'
 import { RelayPool } from './relay-pool'
+import { outbox, replayStoredEvents } from './outbox'
 import { parseGroupEvent, parseExpenseEvent, parseSettlementEvent, parseConfirmationEvent } from './event-validation'
 
 // ─── npub ↔ hex conversion ────────────────────────────────────────────────────
@@ -53,8 +54,36 @@ export async function publishEvent(pubkey, kind, content, tags = []) {
       JSON.stringify(signed.tags) !== JSON.stringify(tags) || !verifyEvent(signed)) {
     throw new Error('Firma Nostr non valida o account del signer cambiato')
   }
+  // Persist the fully signed event *before* any network I/O. On timeout the
+  // exact same ID remains available for recovery after a browser restart.
+  outbox.add(signed)
   await pool.publish(signed)
+  // A confirmed relay ACK is enough to clear the local queue. If localStorage
+  // cleanup fails, replaying this same signed ID is harmless (Nostr dedupes IDs).
+  try { outbox.remove(pubkey, signed.id) } catch { /* recover via outbox later */ }
   return signed
+}
+
+// ─── Durable retry ─────────────────────────────────────────────────────────────
+// No signing, no new payment: send only the exact events saved before publication.
+export function pendingOutbox(pubkey) { return outbox.list(pubkey) }
+export function subscribeOutbox(callback) { return outbox.subscribe(callback) }
+
+export async function retryOutbox(pubkey) {
+  if (!isValidPubkey(pubkey) || !window.nostr?.getPublicKey) {
+    throw new Error('Connetti il signer Nostr prima di riprovare')
+  }
+  // A cached session is not proof the NIP-07 account is still the same.
+  const activePubkey = await window.nostr.getPublicKey()
+  if (activePubkey !== pubkey) throw new Error('Account Nostr diverso dalla sessione: impossibile ripubblicare')
+
+  return replayStoredEvents({
+    pubkey,
+    activePubkey,
+    store: outbox,
+    publish: event => pool.publish(event),
+    verify: verifyEvent,
+  })
 }
 
 // ─── Profile ──────────────────────────────────────────────────────────────────

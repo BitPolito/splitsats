@@ -37,7 +37,7 @@ export default function AddExpenseModal({ group, myPubkey, profiles, onConfirm, 
     setSubmitting(true); setPublishError('')
     try { await onConfirm({ description, amount: amountSats, paidBy, category, splits: splitMembers }) }
     catch (error) {
-      if (error.code === 'RELAY_PUBLICATION_UNKNOWN') setDeliveryUncertain(true)
+      if (['RELAY_PUBLICATION_UNKNOWN', 'OUTBOX_PENDING'].includes(error.code)) setDeliveryUncertain(true)
       setPublishError(error.message || 'Pubblicazione non riuscita')
     }
     finally { setSubmitting(false) }

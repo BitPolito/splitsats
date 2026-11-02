@@ -1,5 +1,6 @@
 import { create } from 'zustand'
-import { loadGroups, saveGroups, loadProfiles, saveProfiles, loadPubkey, savePubkey, clearAll } from '../lib/storage'
+import { loadGroups, saveGroups, loadProfiles, saveProfiles, loadPubkey, savePubkey, clearAll, clearPubkey } from '../lib/storage'
+import { verifyCachedSigner } from '../lib/session-identity'
 import { publishEvent, fetchProfile, fetchGroups, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
 import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION } from '../lib/constants'
 import { isNewerGroupDefinition, validPubkey } from '../lib/event-validation'
@@ -20,11 +21,11 @@ function stopActiveSubscriptions() {
 }
 
 export const useStore = create((set, get) => ({
-  pubkey:      loadPubkey(),   // always hex
+  pubkey:      null, // cached key is untrusted until checked against NIP-07
   loading:     false,
   error:       null,
-  groups:      loadGroups(),
-  profiles:    loadProfiles(),
+  groups:      [],
+  profiles:    {},
   relayStatus: 0,
   toast:       null,
 
@@ -32,13 +33,28 @@ export const useStore = create((set, get) => ({
 
   // ─── AUTH ──────────────────────────────────────────────────────────────────
 
+  restoreSession: async () => {
+    if (get().pubkey) return
+    const cached = loadPubkey()
+    if (!cached) return
+    const active = await verifyCachedSigner(cached, typeof window !== 'undefined' && window.nostr)
+    // A user might have logged in manually while the signer prompt was open.
+    if (get().pubkey) return
+    if (active) set({ pubkey: active, groups: loadGroups(active), profiles: loadProfiles(active) })
+    else clearPubkey()
+  },
+
   login: async () => {
     set({ loading: true, error: null })
     try {
       // NIP-07 always returns hex pubkey
       const pubkey = await window.nostr.getPublicKey()
+      // Read/migrate legacy cache under its original owner BEFORE switching the hint.
+      const groups = loadGroups(pubkey)
+      const profiles = loadProfiles(pubkey)
+      stopActiveSubscriptions()
       savePubkey(pubkey)
-      set({ pubkey, loading: false })
+      set({ pubkey, groups, profiles, loading: false })
     } catch (e) {
       set({ error: e.message, loading: false })
     }
@@ -46,7 +62,7 @@ export const useStore = create((set, get) => ({
 
   logout: () => {
     stopActiveSubscriptions()
-    clearAll()
+    clearAll(get().pubkey)
     set({ pubkey: null, groups: [], profiles: {}, error: null })
   },
 
@@ -77,6 +93,7 @@ export const useStore = create((set, get) => ({
     activeSubs['_groups'] = fetchGroups(
       pubkey,
       (groupData) => {
+        if (currentSessionPubkey !== pubkey) return
         const existing = get().getGroup(groupData.id)
         if (!isNewerGroupDefinition(existing, groupData)) return
         const updatedGroup = existing
@@ -86,7 +103,7 @@ export const useStore = create((set, get) => ({
           const groups = existing
             ? s.groups.map(g => g.id === groupData.id ? updatedGroup : g)
             : [...s.groups, updatedGroup]
-          saveGroups(groups)
+          saveGroups(get().pubkey, groups)
           return { groups }
         })
         // Important: membership changes affect which authors are queried.
@@ -94,9 +111,10 @@ export const useStore = create((set, get) => ({
         groupData.members.forEach(m => get().fetchAndCacheProfile(m))
       },
       () => {
+        if (currentSessionPubkey !== pubkey) return
         set(s => {
           const groups = s.groups.map(g => ({ ...g, _synced: true }))
-          saveGroups(groups)
+          saveGroups(get().pubkey, groups)
           return { groups }
         })
       }
@@ -106,6 +124,7 @@ export const useStore = create((set, get) => ({
   // ─── REAL-TIME SUBSCRIPTIONS ───────────────────────────────────────────────
 
   subscribeGroup: (groupId, members) => {
+    const subscriptionOwner = get().pubkey
     const memberKey = [...new Set(members)].sort().join(',')
     if (activeSubs['exp_' + groupId] && subscribedMemberKeys[groupId] === memberKey) return
     // Close old subscriptions before replacing author filters with the new members.
@@ -117,6 +136,7 @@ export const useStore = create((set, get) => ({
     const unsubExp = subscribeExpenses(
       groupId, members,
       (expense) => {
+        if (get().pubkey !== subscriptionOwner || currentSessionPubkey !== subscriptionOwner) return
         set(s => {
           const groups = s.groups.map(g => {
             if (g.id !== groupId) return g
@@ -127,7 +147,7 @@ export const useStore = create((set, get) => ({
               (e.id === expense.id && e._pubkey === expense._pubkey))) return g
             return { ...g, expenses: [...g.expenses, expense] }
           })
-          saveGroups(groups)
+          saveGroups(get().pubkey, groups)
           return { groups }
         })
       },
@@ -137,6 +157,7 @@ export const useStore = create((set, get) => ({
     const unsubSet = subscribeSettlements(
       groupId, members,
       (settlement) => {
+        if (get().pubkey !== subscriptionOwner || currentSessionPubkey !== subscriptionOwner) return
         set(s => {
           const groups = s.groups.map(g => {
             if (g.id !== groupId) return g
@@ -148,7 +169,7 @@ export const useStore = create((set, get) => ({
             )) return g
             return { ...g, settlements: [...(g.settlements || []), settlement] }
           })
-          saveGroups(groups)
+          saveGroups(get().pubkey, groups)
           return { groups }
         })
       },
@@ -158,6 +179,7 @@ export const useStore = create((set, get) => ({
     const unsubConf = subscribeConfirmations(
       groupId, members,
       (confirmation) => {
+        if (get().pubkey !== subscriptionOwner || currentSessionPubkey !== subscriptionOwner) return
         set(s => {
           const groups = s.groups.map(g => {
             if (g.id !== groupId || !g.members.includes(confirmation._pubkey) ||
@@ -166,7 +188,7 @@ export const useStore = create((set, get) => ({
             if (confirmations.some(c => c._eventId === confirmation._eventId)) return g
             return { ...g, confirmations: [...confirmations, confirmation] }
           })
-          saveGroups(groups)
+          saveGroups(get().pubkey, groups)
           return { groups }
         })
       },
@@ -186,10 +208,12 @@ export const useStore = create((set, get) => ({
     if (!force && cached && (cached.name || cached.display_name || cached.lud16)) return
     const subKey = 'profile_' + hexPubkey
     activeSubs[subKey]?.()
+    const sessionOwner = get().pubkey
     activeSubs[subKey] = fetchProfile(hexPubkey, (pk, meta) => {
+      if (sessionOwner !== get().pubkey) return
       set(s => {
         const updated = { ...s.profiles, [pk]: meta }
-        saveProfiles(updated)
+        saveProfiles(get().pubkey, updated)
         return { profiles: updated }
       })
     })
@@ -212,11 +236,13 @@ export const useStore = create((set, get) => ({
       ...members.map(m => ['p', m]),
     ])
 
+    if (get().pubkey !== pubkey) return groupId // event accepted for the prior account
+
     const newGroup = { ...groupData, pubkey, eventId: signed.id,
       _groupCreatedAt: signed.created_at, expenses: [], settlements: [], confirmations: [], _synced: true }
     set(s => {
       const updated = [...s.groups, newGroup]
-      saveGroups(updated)
+      saveGroups(get().pubkey, updated)
       return { groups: updated, toast: `Gruppo "${name}" creato` }
     })
 
@@ -247,6 +273,8 @@ export const useStore = create((set, get) => ({
       ...group.members.map(m => ['p', m]),
     ])
 
+    if (get().pubkey !== pubkey) return // keep event associated with its signing account
+
     const localExpense = { ...expenseData, _eventId: signed.id, _pubkey: pubkey }
     set(s => {
       const groups = s.groups.map(g => {
@@ -255,7 +283,7 @@ export const useStore = create((set, get) => ({
           (e.id === expenseData.id && e._pubkey === pubkey))) return g
         return { ...g, expenses: [...g.expenses, localExpense] }
       })
-      saveGroups(groups)
+      saveGroups(get().pubkey, groups)
       return { groups, toast: `"${expense.description}" — ${expense.amount.toLocaleString()} sats` }
     })
   },
@@ -282,6 +310,8 @@ export const useStore = create((set, get) => ({
       ['g', groupId], ['p', to], ['t', 'splitsats'],
     ])
 
+    if (get().pubkey !== pubkey) return
+
     const localSettlement = { ...data, _eventId: signed.id, _pubkey: pubkey }
     set(s => {
       const groups = s.groups.map(g => {
@@ -291,7 +321,7 @@ export const useStore = create((set, get) => ({
           (s.id === data.id && s._pubkey === pubkey))) return g
         return { ...g, settlements: [...settlements, localSettlement] }
       })
-      saveGroups(groups)
+      saveGroups(get().pubkey, groups)
       return { groups, toast: 'Richiesta registrata: in attesa di conferma del destinatario' }
     })
   },
@@ -317,6 +347,7 @@ export const useStore = create((set, get) => ({
     const signed = await publishEvent(pubkey, KIND_CONFIRMATION, data, [
       ['g', groupId], ['e', settlement._eventId], ['p', settlement.from], ['t', 'splitsats'],
     ])
+    if (get().pubkey !== pubkey) return
     const confirmation = { ...data, _eventId: signed.id, _pubkey: pubkey }
     set(s => {
       const groups = s.groups.map(g => {
@@ -325,7 +356,7 @@ export const useStore = create((set, get) => ({
             c._pubkey === pubkey)) return g
         return { ...g, confirmations: [...(g.confirmations || []), confirmation] }
       })
-      saveGroups(groups)
+      saveGroups(get().pubkey, groups)
       return { groups, toast: 'Ricezione confermata: il saldo e stato aggiornato' }
     })
   },
