@@ -7,6 +7,20 @@ export default function CreateGroupModal({ myPubkey, onConfirm, onClose }) {
   const [memberInput, setInput]     = useState('')
   const [members,     setMembers]   = useState([myPubkey])
   const [inputError,  setInputError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [publishError, setPublishError] = useState('')
+  const [deliveryUncertain, setDeliveryUncertain] = useState(false)
+
+  const handleCreate = async () => {
+    if (submitting) return
+    setSubmitting(true); setPublishError('')
+    try { await onConfirm({ name: name.trim(), members }) }
+    catch (error) {
+      if (error.code === 'RELAY_PUBLICATION_UNKNOWN') setDeliveryUncertain(true)
+      setPublishError(error.message || 'Pubblicazione non riuscita')
+    }
+    finally { setSubmitting(false) }
+  }
 
   const addMember = () => {
     const raw = memberInput.trim()
@@ -18,7 +32,7 @@ export default function CreateGroupModal({ myPubkey, onConfirm, onClose }) {
   }
 
   return (
-    <ModalShell onClose={onClose}>
+    <ModalShell onClose={submitting ? () => {} : onClose}>
       <div style={{ fontFamily: 'var(--pixel)', fontSize: 11, color: 'var(--blue)' }}>NEW GROUP</div>
 
       <FormGroup label="NOME GRUPPO">
@@ -54,11 +68,15 @@ export default function CreateGroupModal({ myPubkey, onConfirm, onClose }) {
         ))}
       </div>
 
-      <Button variant="primary" disabled={!name.trim() || members.length < 2}
-        onClick={() => onConfirm({ name: name.trim(), members })}>
-        CREATE GROUP
+      {publishError && <div role="alert" style={{ fontFamily: 'var(--pixel)', fontSize: 7, color: 'var(--red)', lineHeight: 2 }}>
+        {publishError}
+        {deliveryUncertain && <div>Chiudi, verifica se l'evento e' apparso nel gruppo dopo la sincronizzazione, poi decidi se riprovare.</div>}
+      </div>}
+      <Button variant="primary" disabled={submitting || deliveryUncertain || !name.trim() || members.length < 2}
+        onClick={handleCreate}>
+        {submitting ? 'PUBBLICAZIONE...' : 'CREATE GROUP'}
       </Button>
-      <Button variant="ghost" onClick={onClose}>ANNULLA</Button>
+      <Button variant="ghost" disabled={submitting} onClick={onClose}>ANNULLA</Button>
     </ModalShell>
   )
 }
