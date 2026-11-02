@@ -1,6 +1,7 @@
 import { verifyEvent } from 'nostr-tools'
 import { nip19 } from 'nostr-tools'
 import { RELAYS } from './constants'
+import { parseGroupEvent, parseExpenseEvent, parseSettlementEvent } from './event-validation'
 
 // ─── npub ↔ hex conversion ────────────────────────────────────────────────────
 // Nostr relays always use hex pubkeys. npub is only a display format.
@@ -130,6 +131,11 @@ export async function publishEvent(pubkey, kind, content, tags = []) {
     content: typeof content === 'string' ? content : JSON.stringify(content),
   }
   const signed = await window.nostr.signEvent(event)
+  // Do not publish a forged event if the browser's NIP-07 account changed.
+  if (signed.pubkey !== pubkey || signed.kind !== kind || signed.content !== event.content ||
+      JSON.stringify(signed.tags) !== JSON.stringify(tags) || !verifyEvent(signed)) {
+    throw new Error('Firma Nostr non valida o account del signer cambiato')
+  }
   pool.publish(signed)
   return signed
 }
@@ -157,14 +163,8 @@ export function fetchGroups(hexPubkey, onGroup, onDone) {
   const checkDone = () => { if (++eoseCount >= 2) onDone?.() }
 
   const handleGroupEvent = (event) => {
-    try {
-      const data    = JSON.parse(event.content)
-      const dTag    = event.tags.find(t => t[0] === 'd')?.[1]
-      if (!dTag) return
-      // Ensure members are always stored as hex
-      const members = (data.members || []).map(npubToHex)
-      onGroup({ ...data, members, id: dTag, pubkey: event.pubkey, eventId: event.id })
-    } catch {}
+    const group = parseGroupEvent(event, hexPubkey, npubToHex)
+    if (group) onGroup(group)
   }
 
   const unsubAuthored = pool.subscribe({
@@ -191,10 +191,8 @@ export function subscribeExpenses(groupId, hexMembers, onExpense, onEose) {
     id:      'expenses_' + groupId,
     filters: [{ kinds: [9000], authors: hexMembers, '#g': [groupId], limit: 500 }],
     onEvent: (event) => {
-      try {
-        const data = JSON.parse(event.content)
-        onExpense({ ...data, _eventId: event.id, _pubkey: event.pubkey })
-      } catch {}
+      const expense = parseExpenseEvent(event, { id: groupId, members: hexMembers })
+      if (expense) onExpense(expense)
     },
     onEose,
   })
@@ -207,10 +205,8 @@ export function subscribeSettlements(groupId, hexMembers, onSettlement, onEose) 
     id:      'settlements_' + groupId,
     filters: [{ kinds: [9001], authors: hexMembers, '#g': [groupId], limit: 200 }],
     onEvent: (event) => {
-      try {
-        const data = JSON.parse(event.content)
-        onSettlement({ ...data, _eventId: event.id })
-      } catch {}
+      const settlement = parseSettlementEvent(event, { id: groupId, members: hexMembers })
+      if (settlement) onSettlement(settlement)
     },
     onEose,
   })
