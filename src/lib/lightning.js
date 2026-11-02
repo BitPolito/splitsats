@@ -1,5 +1,5 @@
 // ─── Lightning / WebLN helpers ────────────────────────────────────────────────
-// LNURL calls go through /api/lnurl (Vercel Edge Function in prod,
+// LNURL calls go through /api/lnurl (Vercel Node.js Function in prod,
 // Vite plugin middleware in dev) to bypass browser CORS restrictions.
 
 export const hasWebLN = () => typeof window !== 'undefined' && typeof window.webln !== 'undefined'
@@ -11,8 +11,7 @@ export async function enableWebLN() {
 
 // ── Step 1: resolve Lightning Address → LNURL-pay metadata ──
 export async function resolveLightningAddress(address) {
-  const [user, domain] = (address || '').split('@')
-  if (!user || !domain) throw new Error('Lightning Address non valido')
+  if (typeof address !== 'string' || !address.includes('@')) throw new Error('Lightning Address non valido')
 
   const res = await fetch(`/api/lnurl?address=${encodeURIComponent(address)}`)
   const data = await res.json()
@@ -21,9 +20,12 @@ export async function resolveLightningAddress(address) {
 }
 
 // ── Step 2: fetch BOLT11 invoice ──
-export async function fetchInvoice(callbackUrl, amountSats) {
-  const encoded = encodeURIComponent(callbackUrl)
-  const res     = await fetch(`/api/lnurl?callback=${encoded}&amount=${amountSats * 1000}`)
+export async function fetchInvoice(address, amountSats) {
+  if (!Number.isSafeInteger(amountSats) || amountSats <= 0 ||
+      amountSats > Math.floor(Number.MAX_SAFE_INTEGER / 1000)) {
+    throw new Error('Importo in satoshi non valido')
+  }
+  const res = await fetch(`/api/lnurl?address=${encodeURIComponent(address)}&amount=${amountSats * 1000}`)
   const data    = await res.json()
   if (!res.ok || data.error) throw new Error(data.error || `Errore HTTP ${res.status}`)
   if (!data.pr) throw new Error('Nessuna invoice ricevuta dal server')
@@ -38,15 +40,14 @@ export async function payLightningAddress(address, amountSats) {
   const maxSats = Math.floor((meta.maxSendable || 1e10) / 1000)
   if (amountSats < minSats) throw new Error(`Minimo: ${minSats.toLocaleString()} sats`)
   if (amountSats > maxSats) throw new Error(`Massimo: ${maxSats.toLocaleString()} sats`)
-  const invoice = await fetchInvoice(meta.callback, amountSats)
+  const invoice = await fetchInvoice(address, amountSats)
   const result  = await window.webln.sendPayment(invoice)
   return { preimage: result.preimage, invoice }
 }
 
 // ── QR fallback: generate invoice without WebLN ──
 export async function generateInvoiceForAddress(address, amountSats) {
-  const meta = await resolveLightningAddress(address)
-  return fetchInvoice(meta.callback, amountSats)
+  return fetchInvoice(address, amountSats)
 }
 
 // ── Dev mock — injected only in development when Alby is absent ──
