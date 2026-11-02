@@ -35,6 +35,7 @@ export async function fetchInvoice(address, amountSats) {
 // ── Full pay flow (with WebLN) ──
 export async function payLightningAddress(address, amountSats) {
   await enableWebLN()
+  if (window.webln.__splitsatsMock) throw new Error('Wallet simulato: nessun pagamento reale. Non usare il mock per saldare debiti.')
   const meta    = await resolveLightningAddress(address)
   const minSats = Math.ceil((meta.minSendable || 1000) / 1000)
   const maxSats = Math.floor((meta.maxSendable || 1e10) / 1000)
@@ -56,6 +57,7 @@ export function injectDevMock() {
   if (window.webln) return // real WebLN already present, don't override
   console.info('[SplitSats] WebLN mock attivo (dev) — nessun pagamento reale')
   window.webln = {
+    __splitsatsMock: true,
     enable:      async () => {},
     sendPayment: async (invoice) => {
       console.log('[mock] sendPayment:', invoice)

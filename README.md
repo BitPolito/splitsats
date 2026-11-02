@@ -51,11 +51,16 @@ src/
 └── components/          # UI primitives + modals
 ```
 
+## Conferma pagamenti
+
+Le richieste di pagamento (anche WebLN) rimangono **in attesa** finché il destinatario non firma una conferma Nostr. Una risposta WebLN da sola non prova la ricezione. I vecchi pagamenti non confermati non vengono più sottratti ai saldi: verifica la migrazione prima del deploy. Dettagli: [docs/PAYMENT-CONFIRMATION.md](docs/PAYMENT-CONFIRMATION.md).
+
 ## Nostr event kinds usati
 
 | Kind  | Uso                        |
 |-------|----------------------------|
 | 0     | Profilo utente (NIP-01)    |
 | 9000  | Spesa                      |
-| 9001  | Pagamento / settlement     |
+| 9001  | Dichiarazione di pagamento (in attesa) |
+| 9002  | Conferma del destinatario |
 | 30001 | Definizione gruppo         |

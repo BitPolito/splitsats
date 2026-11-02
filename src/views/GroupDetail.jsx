@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { simplifyDebts } from '../lib/balances'
+import { approvedSettlements, settlementStatus } from '../lib/settlement-status'
 import { Avatar, Tag, Empty, SectionHeader, Button, truncate } from '../components/ui'
 import { hexToNpub } from '../lib/nostr'
 
@@ -13,14 +14,18 @@ const statBox = (label, value, color) => (
   </div>
 )
 
-export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddExpense, onSettle }) {
+export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddExpense, onSettle, onConfirmSettlement }) {
   const [tab, setTab] = useState('expenses')
+  const [confirmingId, setConfirmingId] = useState(null)
+  const [confirmationError, setConfirmationError] = useState('')
 
   const expenses    = group.expenses    || []
   const settlements = group.settlements || []
   const members     = group.members     || []
+  const confirmations = group.confirmations || []
+  const approved = approvedSettlements(settlements, confirmations)
 
-  const debts      = simplifyDebts(expenses, settlements, members)
+  const debts      = simplifyDebts(expenses, approved, members)
   const totalSpent = expenses.reduce((s, e) => s + e.amount, 0)
   const myDebt     = debts.filter(d => d.from === myPubkey).reduce((s, d) => s + d.amount, 0)
   const myCredit   = debts.filter(d => d.to   === myPubkey).reduce((s, d) => s + d.amount, 0)
@@ -105,6 +110,8 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
             const fromName = profiles[d.from]?.name || truncate(d.from, 6)
             const toName   = profiles[d.to]?.name   || truncate(d.to, 6)
             const isMe     = d.from === myPubkey
+            const hasPending = settlements.some(s => s.from === d.from && s.to === d.to &&
+              settlementStatus(s, confirmations) !== 'confirmed')
             return (
               <div key={i} style={{ background: 'var(--surface)', border: `2px solid ${isMe ? 'var(--red)' : 'var(--blue)'}`, padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 12 }}>
                 <Avatar pubkey={d.from} />
@@ -117,11 +124,11 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
                   <div style={{ fontFamily: 'var(--pixel)', fontSize: 8, color: 'var(--blue)' }}>{sats(d.amount)}</div>
                 </div>
                 {isMe && (
-                  <button onClick={() => onSettle(d)} style={{
+                  <button disabled={hasPending} onClick={() => onSettle(d)} style={{
                     fontFamily: 'var(--pixel)', fontSize: 8, background: 'var(--blue)', color: '#fff',
                     border: '2px solid var(--blue)', padding: '7px 12px', cursor: 'pointer',
                   }}>
-                    PAY ⚡
+                    {hasPending ? 'IN ATTESA' : 'PAY ⚡'}
                   </button>
                 )}
               </div>
@@ -129,17 +136,39 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
           })}
 
           {settlements.length > 0 && <>
-            <div style={{ fontFamily: 'var(--pixel)', fontSize: 8, color: 'var(--text3)', marginTop: 8 }}>// pagamenti registrati</div>
+            <div style={{ fontFamily: 'var(--pixel)', fontSize: 8, color: 'var(--text3)', marginTop: 8 }}>// richieste di pagamento</div>
+            <div style={{ fontFamily: 'var(--mono)', fontSize: 10, lineHeight: 1.6, color: 'var(--text3)' }}>
+              Solo i pagamenti confermati dal destinatario sono sottratti ai debiti. Le vecchie registrazioni richiedono una nuova conferma.
+            </div>
+            {confirmationError && <div role="alert" style={{ color: 'var(--red)', fontFamily: 'var(--mono)', fontSize: 11 }}>{confirmationError}</div>}
             {settlements.map((s, i) => {
               const fromName = profiles[s.from]?.name || truncate(s.from, 6)
               const toName   = profiles[s.to]?.name   || truncate(s.to, 6)
+              const status = settlementStatus(s, confirmations)
               return (
-                <div key={i} style={{ background: 'var(--surface2)', border: '2px solid var(--text3)', padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 12, opacity: 0.7 }}>
+                <div key={s._eventId || i} style={{ background: 'var(--surface2)', border: '2px solid var(--text3)', padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                   <Avatar pubkey={s.from} />
                   <div style={{ flex: 1, fontFamily: 'var(--pixel)', fontSize: 8, color: 'var(--text2)' }}>
                     {s.from === myPubkey ? 'TU' : fromName.toUpperCase()} → {s.to === myPubkey ? 'TU' : toName.toUpperCase()}
                   </div>
-                  <div style={{ fontFamily: 'var(--pixel)', fontSize: 8, color: 'var(--green)' }}>✓ {sats(s.amount)}</div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={{ fontFamily: 'var(--pixel)', fontSize: 8, color: status === 'confirmed' ? 'var(--green)' : 'var(--text3)' }}>{sats(s.amount)}</div>
+                    <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: status === 'confirmed' ? 'var(--green)' : 'var(--text3)', marginTop: 6 }}>
+                      {status === 'confirmed' ? 'CONFERMATO DAL DESTINATARIO' : status === 'wallet-reported' ? 'WEBLN DICHIARATO: IN ATTESA' : 'DICHIARATO: IN ATTESA'}
+                    </div>
+                  </div>
+                  {s.to === myPubkey && status !== 'confirmed' && (
+                    <button disabled={confirmingId === s._eventId} style={{ border: '2px solid var(--blue)', background: 'var(--blue)', color: 'white', padding: 8, fontFamily: 'var(--pixel)', fontSize: 7, cursor: 'pointer' }}
+                      onClick={async () => {
+                        if (!window.confirm(`Confermi di aver ricevuto ${s.amount} sat? Controlla prima il tuo wallet.`)) return
+                        setConfirmingId(s._eventId); setConfirmationError('')
+                        try { await onConfirmSettlement(s._eventId) }
+                        catch (error) { setConfirmationError(error.message || 'Errore di conferma') }
+                        finally { setConfirmingId(null) }
+                      }}>
+                      {confirmingId === s._eventId ? 'INVIO...' : 'CONFERMA RICEZIONE'}
+                    </button>
+                  )}
                 </div>
               )
             })}

@@ -25,6 +25,7 @@ export default function App() {
   const createGroup      = useStore(s => s.createGroup)
   const addExpense       = useStore(s => s.addExpense)
   const recordSettlement = useStore(s => s.recordSettlement)
+  const confirmSettlement = useStore(s => s.confirmSettlement)
 
   // Restore relay subscriptions when a cached session is loaded after a refresh.
   useEffect(() => { if (pubkey) initSession(pubkey) }, [pubkey, initSession])
@@ -80,6 +81,7 @@ export default function App() {
           onBack={() => setSelectedGroup(null)}
           onAddExpense={() => setModal('addExpense')}
           onSettle={(debt) => { setSettleDebt(debt); setModal('settle') }}
+          onConfirmSettlement={(settlementId) => confirmSettlement(liveGroup.id, settlementId)}
         />
       ) : (
         <>

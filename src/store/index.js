@@ -1,8 +1,9 @@
 import { create } from 'zustand'
 import { loadGroups, saveGroups, loadProfiles, saveProfiles, loadPubkey, savePubkey, clearAll } from '../lib/storage'
-import { publishEvent, fetchProfile, fetchGroups, subscribeExpenses, subscribeSettlements, pool, npubToHex } from '../lib/nostr'
-import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT } from '../lib/constants'
+import { publishEvent, fetchProfile, fetchGroups, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
+import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION } from '../lib/constants'
 import { isNewerGroupDefinition, validPubkey } from '../lib/event-validation'
+import { isConfirmedSettlement } from '../lib/settlement-status'
 
 const randId = () => crypto.randomUUID()
 const now    = () => Math.floor(Date.now() / 1000)
@@ -79,8 +80,8 @@ export const useStore = create((set, get) => ({
         const existing = get().getGroup(groupData.id)
         if (!isNewerGroupDefinition(existing, groupData)) return
         const updatedGroup = existing
-          ? { ...existing, ...groupData, expenses: existing.expenses || [], settlements: existing.settlements || [] }
-          : { ...groupData, expenses: [], settlements: [], _synced: false }
+          ? { ...existing, ...groupData, expenses: existing.expenses || [], settlements: existing.settlements || [], confirmations: existing.confirmations || [] }
+          : { ...groupData, expenses: [], settlements: [], confirmations: [], _synced: false }
         set(s => {
           const groups = existing
             ? s.groups.map(g => g.id === groupData.id ? updatedGroup : g)
@@ -110,6 +111,7 @@ export const useStore = create((set, get) => ({
     // Close old subscriptions before replacing author filters with the new members.
     activeSubs['exp_' + groupId]?.()
     activeSubs['set_' + groupId]?.()
+    activeSubs['conf_' + groupId]?.()
     subscribedMemberKeys[groupId] = memberKey
 
     const unsubExp = subscribeExpenses(
@@ -153,6 +155,25 @@ export const useStore = create((set, get) => ({
       () => {}
     )
 
+    const unsubConf = subscribeConfirmations(
+      groupId, members,
+      (confirmation) => {
+        set(s => {
+          const groups = s.groups.map(g => {
+            if (g.id !== groupId || !g.members.includes(confirmation._pubkey) ||
+                !g.members.includes(confirmation.from) || !g.members.includes(confirmation.to)) return g
+            const confirmations = g.confirmations || []
+            if (confirmations.some(c => c._eventId === confirmation._eventId)) return g
+            return { ...g, confirmations: [...confirmations, confirmation] }
+          })
+          saveGroups(groups)
+          return { groups }
+        })
+      },
+      () => {}
+    )
+
+    activeSubs['conf_' + groupId] = unsubConf
     activeSubs['exp_' + groupId] = unsubExp
     activeSubs['set_' + groupId] = unsubSet
   },
@@ -192,7 +213,7 @@ export const useStore = create((set, get) => ({
     ])
 
     const newGroup = { ...groupData, pubkey, eventId: signed.id,
-      _groupCreatedAt: signed.created_at, expenses: [], settlements: [], _synced: true }
+      _groupCreatedAt: signed.created_at, expenses: [], settlements: [], confirmations: [], _synced: true }
     set(s => {
       const updated = [...s.groups, newGroup]
       saveGroups(updated)
@@ -241,19 +262,24 @@ export const useStore = create((set, get) => ({
 
   // ─── SETTLEMENTS ───────────────────────────────────────────────────────────
 
-  recordSettlement: async (groupId, { from, to, amount }) => {
+  recordSettlement: async (groupId, { from, to, amount, method = 'manual', walletReported = false }) => {
     const { pubkey } = get()
     const group = get().getGroup(groupId)
     if (!group || !group.members.includes(from) || !group.members.includes(to) ||
-        from !== pubkey || from === to || !Number.isSafeInteger(amount) || amount <= 0) {
-      throw new Error('Puoi registrare soltanto i tuoi pagamenti validi')
+        from !== pubkey || from === to || !Number.isSafeInteger(amount) || amount <= 0 ||
+        !['manual', 'webln'].includes(method) ||
+        (walletReported && method !== 'webln')) {
+      throw new Error('Puoi dichiarare soltanto i tuoi pagamenti validi')
     }
-    const data = { id: randId(), from, to, amount, settledAt: now() }
+    // A second unresolved claim for the same pair risks an accidental double payment.
+    if ((group.settlements || []).some(s => s.from === from && s.to === to &&
+        !isConfirmedSettlement(s, group.confirmations || []))) {
+      throw new Error('Hai gia un pagamento in attesa di conferma verso questo destinatario')
+    }
+    const data = { id: randId(), from, to, amount, method, walletReported, settledAt: now() }
 
     const signed = await publishEvent(pubkey, KIND_SETTLEMENT, data, [
-      ['g', groupId],
-      ['p', to],
-      ['t', 'splitsats'],
+      ['g', groupId], ['p', to], ['t', 'splitsats'],
     ])
 
     const localSettlement = { ...data, _eventId: signed.id, _pubkey: pubkey }
@@ -266,7 +292,41 @@ export const useStore = create((set, get) => ({
         return { ...g, settlements: [...settlements, localSettlement] }
       })
       saveGroups(groups)
-      return { groups, toast: `Pagamento di ${amount.toLocaleString()} sats registrato` }
+      return { groups, toast: 'Richiesta registrata: in attesa di conferma del destinatario' }
+    })
+  },
+
+  // ─── PAYEE CONFIRMATION (independent Nostr signature) ────────────────────
+
+  confirmSettlement: async (groupId, settlementId) => {
+    const { pubkey } = get()
+    const group = get().getGroup(groupId)
+    const settlement = group?.settlements?.find(s => s._eventId === settlementId)
+    if (!group || !settlement || settlement.to !== pubkey ||
+        !group.members.includes(settlement.from) || !group.members.includes(pubkey)) {
+      throw new Error('Solo il destinatario puo confermare questo pagamento')
+    }
+    if (isConfirmedSettlement(settlement, group.confirmations || [])) {
+      throw new Error('Questo pagamento e gia confermato')
+    }
+    const data = {
+      id: randId(), settlementEventId: settlement._eventId,
+      from: settlement.from, to: settlement.to, amount: settlement.amount,
+      confirmedAt: now(),
+    }
+    const signed = await publishEvent(pubkey, KIND_CONFIRMATION, data, [
+      ['g', groupId], ['e', settlement._eventId], ['p', settlement.from], ['t', 'splitsats'],
+    ])
+    const confirmation = { ...data, _eventId: signed.id, _pubkey: pubkey }
+    set(s => {
+      const groups = s.groups.map(g => {
+        if (g.id !== groupId) return g
+        if ((g.confirmations || []).some(c => c.settlementEventId === settlement._eventId &&
+            c._pubkey === pubkey)) return g
+        return { ...g, confirmations: [...(g.confirmations || []), confirmation] }
+      })
+      saveGroups(groups)
+      return { groups, toast: 'Ricezione confermata: il saldo e stato aggiornato' }
     })
   },
 
