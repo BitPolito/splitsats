@@ -17,6 +17,13 @@ npm install
 npm run dev
 ```
 
+Per verificare le regole dei saldi prima di una PR:
+
+```bash
+npm test
+npm run build
+```
+
 Apri `http://localhost:5173` con l'estensione **Alby** installata.
 
 ## Deploy su Vercel

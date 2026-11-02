@@ -7,20 +7,32 @@ export function calcNetBalances(expenses = [], settlements = [], members = []) {
   members.forEach(m => { net[m] = 0 })
 
   expenses.forEach(exp => {
-    const involved = exp.splits?.length ? exp.splits : members
-    const perPerson = Math.round(exp.amount / involved.length)
-    involved.forEach(member => {
+    // Only accepted, integer satoshi amounts can affect a balance.
+    if (!exp || !Number.isSafeInteger(exp.amount) || exp.amount <= 0 || !members.includes(exp.paidBy)) return
+
+    const requested = exp.splits?.length ? exp.splits : members
+    // A malformed relay event must not create debts for non-members or charge someone twice.
+    const involved = [...new Set(requested)].filter(member => members.includes(member))
+    if (!involved.length) return
+
+    // Distribute every satoshi: Math.round(amount / n) silently over/undercharges.
+    const base = Math.floor(exp.amount / involved.length)
+    const remainder = exp.amount % involved.length
+    involved.forEach((member, index) => {
+      const share = base + (index < remainder ? 1 : 0)
       if (member !== exp.paidBy) {
-        net[exp.paidBy]  = (net[exp.paidBy]  || 0) + perPerson
-        net[member]      = (net[member]       || 0) - perPerson
+        net[exp.paidBy] += share
+        net[member] -= share
       }
     })
   })
 
-  // Apply settlements
+  // Apply only valid transfers between existing members.
   settlements.forEach(s => {
-    net[s.from] = (net[s.from] || 0) + s.amount
-    net[s.to]   = (net[s.to]   || 0) - s.amount
+    if (!s || !Number.isSafeInteger(s.amount) || s.amount <= 0 || s.from === s.to) return
+    if (!members.includes(s.from) || !members.includes(s.to)) return
+    net[s.from] += s.amount
+    net[s.to] -= s.amount
   })
 
   return net
