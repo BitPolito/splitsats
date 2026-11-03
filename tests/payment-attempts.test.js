@@ -5,6 +5,7 @@ import {
   releaseConfirmedPaymentAttempt, releaseVerifiedUnpaidAttempt,
 } from '../src/lib/payment-attempts.js'
 import { payLightningAddress, prepareExternalWalletInvoice } from '../src/lib/lightning.js'
+import { createSignedInvoice } from './helpers/bolt11-fixture.js'
 
 const A = 'a'.repeat(64)
 const B = 'b'.repeat(64)
@@ -35,7 +36,8 @@ test('persists before WebLN receives the invoice and blocks a second payment aft
   let calls = 0
   try {
     globalThis.fetch = async url => ({ ok: true, json: async () => url.includes('amount=')
-      ? { pr: 'lnbc-test-invoice' } : { minSendable: 1000, maxSendable: 100000 } })
+      ? { pr: createSignedInvoice({ amountMsats: Number(new URL(url, 'https://example.org').searchParams.get('amount')), preimageHex: 'f'.repeat(64) }) }
+      : { minSendable: 1000, maxSendable: 100000 } })
     globalThis.window = { webln: {
       enable: async () => {},
       sendPayment: async () => {
@@ -88,7 +90,8 @@ test('a storage write failure blocks wallet submission before sending funds', as
   try {
     f.store.setItem = () => { throw Error('Quota exceeded') }
     globalThis.fetch = async url => ({ ok: true, json: async () => url.includes('amount=')
-      ? { pr: 'lnbc-test-invoice' } : { minSendable: 1000, maxSendable: 100000 } })
+      ? { pr: createSignedInvoice({ amountMsats: Number(new URL(url, 'https://example.org').searchParams.get('amount')), preimageHex: 'f'.repeat(64) }) }
+      : { minSendable: 1000, maxSendable: 100000 } })
     globalThis.window = { webln: { enable: async () => {},
       sendPayment: async () => { sendCalls++; return { preimage: 'f'.repeat(64) } } } }
     await assert.rejects(payLightningAddress('alice@example.org', 10, {
@@ -222,7 +225,7 @@ test('async signer validation callback rejects before the wallet is invoked', as
   try {
     globalThis.window = { webln: { enable: async () => {}, sendPayment: async () => { calls++ } } }
     globalThis.fetch = async url => ({ ok: true, json: async () => url.includes('amount=')
-      ? { pr: 'lnbc-test' } : { minSendable: 1000, maxSendable: 100000 } })
+      ? { pr: createSignedInvoice({ amountMsats: 10000 }) } : { minSendable: 1000, maxSendable: 100000 } })
     await assert.rejects(payLightningAddress('alice@example.org', 10, {
       onWalletSubmission: async () => { await Promise.resolve(); throw Error('Signer changed') },
     }), /Signer changed/)
@@ -245,12 +248,12 @@ test('external QR is returned only after persisting the attempt and cannot be is
   try {
     globalThis.fetch = async () => {
       fetches++
-      return { ok: true, json: async () => ({ pr: 'lnbc-qr-test' }) }
+      return { ok: true, json: async () => ({ pr: createSignedInvoice({ amountMsats: 12000 }) }) }
     }
     const { invoice, attempt } = await prepareExternalWalletInvoice('alice@example.org', 12, identity, {
       ensureSigner: async () => { assert.equal(getPaymentAttempt(identity), null) },
     })
-    assert.equal(invoice, 'lnbc-qr-test')
+    assert.ok(invoice.startsWith('lnbc'))
     assert.equal(attempt.status, 'submitted')
     assert.equal(getPaymentAttempt(identity)?.amount, 12)
     assert.equal(fetches, 1)
@@ -271,7 +274,7 @@ test('external QR fails closed if signer changes or local storage is unavailable
   const f = setup()
   const oldFetch = globalThis.fetch
   try {
-    globalThis.fetch = async () => ({ ok: true, json: async () => ({ pr: 'lnbc-qr-test' }) })
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ pr: createSignedInvoice({ amountMsats: 25000 }) }) })
     await assert.rejects(prepareExternalWalletInvoice('alice@example.org', 25, identity, {
       ensureSigner: async () => { throw Error('Signer changed') },
     }), /Signer changed/)
@@ -297,7 +300,8 @@ test('QR reservation and WebLN share the same debtor/group/payee lock', async ()
   const oldWindow = globalThis.window
   try {
     globalThis.fetch = async url => ({ ok: true, json: async () => url.includes('amount=')
-      ? { pr: 'lnbc-qr-test' } : { minSendable: 1000, maxSendable: 100000 } })
+      ? { pr: createSignedInvoice({ amountMsats: 12000 }) }
+      : { minSendable: 1000, maxSendable: 100000 } })
     await prepareExternalWalletInvoice('alice@example.org', 12, identity, { ensureSigner: async () => {} })
     globalThis.window = { webln: {
       enable: async () => {},

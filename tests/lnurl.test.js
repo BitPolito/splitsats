@@ -4,6 +4,7 @@ import {
   isPublicIpv4, validateHttpsUrl, parseLightningAddress, processLnurlRequest, secureGetJson,
 } from '../server/lnurl-core.js'
 import lnurlHandler from '../api/lnurl.js'
+import { createSignedInvoice, TEST_METADATA } from './helpers/bolt11-fixture.js'
 
 const params = query => new URLSearchParams(query)
 const metadata = {
@@ -11,8 +12,9 @@ const metadata = {
   minSendable: 1000,
   maxSendable: 50000,
   callback: 'https://pay.example.org/invoice?token=signed',
+  metadata: TEST_METADATA,
 }
-const invoice = { pr: 'lnbc1000abcdef12345' }
+const invoice = { pr: createSignedInvoice({ amountMsats: 3000, metadata: TEST_METADATA }) }
 
 const mockProvider = (requests) => async url => {
   requests.push(url)
@@ -126,6 +128,28 @@ test('rejects malformed metadata and invoice responses', async () => {
     assert.equal(output.status, 502)
     assert.ok(!JSON.stringify(output).includes('sensitive server message'))
   }
+})
+
+test('LNURL rejects an otherwise signed invoice with wrong amount, metadata, network or expiry', async () => {
+  const query = params('address=a%40demo.example.com&amount=3000')
+  const invoices = [
+    createSignedInvoice({ amountMsats: 4000 }),
+    createSignedInvoice({ amountMsats: 3000, metadata: '[["text/plain","other"]]' }),
+    createSignedInvoice({ amountMsats: 3000, network: 'tb' }),
+    createSignedInvoice({ amountMsats: 3000, timestamp: Math.floor(Date.now()/1000)-7200, expiry: 1 }),
+  ]
+  for (const pr of invoices) {
+    const result = await processLnurlRequest('GET', query, async url =>
+      url.includes('/.well-known/') ? metadata : { pr })
+    assert.equal(result.status, 502, pr.slice(0, 24))
+  }
+})
+
+test('LNURL rejects raw metadata without a text/plain entry', async () => {
+  const result = await processLnurlRequest('GET', params('address=a%40demo.example.com'), async () => ({
+    ...metadata, metadata: JSON.stringify([['image/png;base64', 'xxx']]),
+  }))
+  assert.equal(result.status, 502)
 })
 
 test('only GET and OPTIONS are allowed', async () => {
