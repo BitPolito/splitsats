@@ -134,11 +134,11 @@ export function fetchGroups(hexPubkey, onGroup, onDone) {
 
 export function subscribeExpenses(groupId, hexMembers, onExpense, onEose, ownerPubkey = null) {
   return pool.subscribe({
-    id:      'expenses_' + groupId,
+    id:      'expenses_' + (ownerPubkey ? `${ownerPubkey}:${groupId}` : groupId),
     filters: [{ kinds: [9000], authors: hexMembers, '#g': [groupId], limit: 500 }],
     onEvent: (event) => {
       const expense = parseExpenseEvent(event, { id: groupId, pubkey: ownerPubkey, members: hexMembers })
-      if (expense) onExpense(expense)
+      if (expense) onExpense({ ...expense, _legacyUnscoped: !event.tags.some(tag => tag[0] === 'a') })
     },
     onEose,
   })
@@ -148,11 +148,11 @@ export function subscribeExpenses(groupId, hexMembers, onExpense, onEose, ownerP
 
 export function subscribeSettlements(groupId, hexMembers, onSettlement, onEose, ownerPubkey = null) {
   return pool.subscribe({
-    id:      'settlements_' + groupId,
+    id:      'settlements_' + (ownerPubkey ? `${ownerPubkey}:${groupId}` : groupId),
     filters: [{ kinds: [9001], authors: hexMembers, '#g': [groupId], limit: 200 }],
     onEvent: (event) => {
       const settlement = parseSettlementEvent(event, { id: groupId, pubkey: ownerPubkey, members: hexMembers })
-      if (settlement) onSettlement(settlement)
+      if (settlement) onSettlement({ ...settlement, _legacyUnscoped: !event.tags.some(tag => tag[0] === 'a') })
     },
     onEose,
   })
@@ -160,11 +160,11 @@ export function subscribeSettlements(groupId, hexMembers, onSettlement, onEose, 
 // ─── Recipient-signed payment confirmations ─────────────────────────────────
 export function subscribeConfirmations(groupId, hexMembers, onConfirmation, onEose, ownerPubkey = null) {
   return pool.subscribe({
-    id:      'confirmations_' + groupId,
+    id:      'confirmations_' + (ownerPubkey ? `${ownerPubkey}:${groupId}` : groupId),
     filters: [{ kinds: [9002], authors: hexMembers, '#g': [groupId], limit: 200 }],
     onEvent: event => {
       const confirmation = parseConfirmationEvent(event, { id: groupId, pubkey: ownerPubkey, members: hexMembers })
-      if (confirmation) onConfirmation(confirmation)
+      if (confirmation) onConfirmation({ ...confirmation, _legacyUnscoped: !event.tags.some(tag => tag[0] === 'a') })
     },
     onEose,
   })

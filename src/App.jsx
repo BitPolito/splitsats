@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useStore } from './store'
 import { Toast } from './components/ui'
 import { pendingOutbox, retryOutbox, subscribeOutbox } from './lib/nostr'
+import { groupAddress } from './lib/group-history'
 
 import LoginView   from './views/LoginView'
 import GroupsView  from './views/GroupsView'
@@ -78,8 +79,10 @@ export default function App() {
   const [modal,         setModal]         = useState(null)
   const [settleDebt,    setSettleDebt]    = useState(null)
 
+  // Never select a same-d group belonging to a different Nostr author,
+  // and never fall back to a stale group removed from the verified state.
   const liveGroup = selectedGroup
-    ? groups.find(g => g.id === selectedGroup.id) || selectedGroup
+    ? groups.find(g => groupAddress(g) === groupAddress(selectedGroup)) || null
     : null
 
   if (!pubkey) return <LoginView onLogin={login} loading={loading} />
@@ -147,7 +150,7 @@ export default function App() {
           onBack={() => setSelectedGroup(null)}
           onAddExpense={() => setModal('addExpense')}
           onSettle={(debt) => { setSettleDebt(debt); setModal('settle') }}
-          onConfirmSettlement={(settlementId) => confirmSettlement(liveGroup.id, settlementId)}
+          onConfirmSettlement={(settlementId) => confirmSettlement(groupAddress(liveGroup), settlementId)}
         />
       ) : (
         <>
@@ -183,14 +186,14 @@ export default function App() {
       {modal === 'addExpense' && liveGroup && (
         <AddExpenseModal
           group={liveGroup} myPubkey={pubkey} profiles={profiles}
-          onConfirm={async (expense) => { await addExpense(liveGroup.id, expense); setModal(null) }}
+          onConfirm={async (expense) => { await addExpense(groupAddress(liveGroup), expense); setModal(null) }}
           onClose={() => setModal(null)}
         />
       )}
       {modal === 'settle' && settleDebt && (
         <SettleModal
           debt={settleDebt} profiles={profiles} groupId={liveGroup?.id} myPubkey={pubkey}
-          onSettled={async (gid, data) => await recordSettlement(gid, data)}
+          onSettled={async (_legacyGroupId, data) => await recordSettlement(groupAddress(liveGroup), data)}
           onClose={() => { setModal(null); setSettleDebt(null) }}
         />
       )}
