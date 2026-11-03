@@ -1,3 +1,5 @@
+import { beginPaymentAttempt, getPaymentAttempt, withPaymentOperationLock } from './payment-attempts.js'
+
 // ─── Lightning / WebLN helpers ────────────────────────────────────────────────
 // LNURL calls go through /api/lnurl (Vercel Node.js Function in prod,
 // Vite plugin middleware in dev) to bypass browser CORS restrictions.
@@ -72,6 +74,26 @@ export async function payLightningAddress(address, amountSats, { onWalletSubmiss
 // ── QR fallback: generate invoice without WebLN ──
 export async function generateInvoiceForAddress(address, amountSats) {
   return fetchInvoice(address, amountSats)
+}
+
+// An invoice shown to a user can be paid with a wallet we cannot observe.
+// Reserve a durable, account-scoped attempt BEFORE exposing it to the UI.
+// A second QR (or WebLN payment) for the same debtor/group/payee is blocked.
+export async function prepareExternalWalletInvoice(address, amountSats, scope, { ensureSigner } = {}) {
+  if (typeof ensureSigner !== 'function') throw new Error('Verifica dell’account Nostr obbligatoria')
+  return withPaymentOperationLock(scope, async () => {
+    if (getPaymentAttempt(scope)) {
+      const error = new Error('Esiste già un tentativo di pagamento: controlla il wallet e il destinatario')
+      error.code = 'PAYMENT_ATTEMPT_PENDING'
+      throw error
+    }
+    const invoice = await fetchInvoice(address, amountSats)
+    // The signer could have switched while the network request was pending.
+    // Fail BEFORE recording or exposing the invoice if identity has changed.
+    await ensureSigner()
+    const attempt = beginPaymentAttempt(scope, amountSats)
+    return { invoice, attempt }
+  })
 }
 
 // ── Dev mock — injected only in development when Alby is absent ──

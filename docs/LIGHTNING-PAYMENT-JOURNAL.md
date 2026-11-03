@@ -34,6 +34,16 @@ Quando il browser supporta Web Locks, le operazioni sono serializzate fra tab
 della stessa origine. Negli altri browser è utilizzata una guardia `localStorage`
 best effort: non è una transazione atomica fra tab.
 
+## Wallet esterno / QR
+
+Prima di rendere visibile il QR, l'app recupera la invoice, ricontrolla il signer
+Nostr e persiste un tentativo con lo **stesso blocco debitore/gruppo/destinatario**
+usato da WebLN. Se lo storage non è scrivibile, il QR non viene mostrato. Un
+refresh, una seconda tab o il passaggio da QR a WebLN non devono consentire un
+nuovo pagamento finché l'esito non è chiarito. La fattura e la preimage non
+vengono scritte nel registro. Un wallet esterno resta non osservabile: l'utente
+deve controllare la cronologia e ottenere la conferma del destinatario.
+
 ## Recupero guidato
 
 - **Pagamento eseguito, dichiarazione mancante:** verificare la cronologia del
@@ -64,8 +74,7 @@ con conferma esatta e Web Locks.
   verifica di hash/importo/destinazione/scadenza e test con wallet reali.
 - Conferma Nostr del destinatario significa attestazione di ricezione, **non**
   verifica indipendente del network Lightning.
-- Il flusso QR usa un wallet esterno, quindi non è ancora protetto da questo
-  registro WebLN. Resta una dichiarazione manuale verificata dal destinatario.
+- Il flusso QR ora riserva un tentativo persistente **prima** di mostrare/copiare la fattura. Non può però stabilire se un wallet esterno l'abbia pagata: non si sblocca automaticamente e il recupero richiede la verifica di wallet e destinatario. Un QR abbandonato può quindi richiedere uno sblocco manuale esplicito.
 - La cache dei gruppi può essere precedente alla sincronizzazione: il blocco
   viene rilasciato automaticamente solo dopo un **nuovo evento firmato ricevuto
   e verificato** dal relay, non sulla base della cache locale.
