@@ -53,7 +53,9 @@ export async function payLightningAddress(address, amountSats, { onWalletSubmiss
   const invoice = await fetchInvoice(address, amountSats)
   // The callback fires immediately before handing the invoice to WebLN, so the
   // UI can lock the payment button before the wallet has a chance to settle.
-  onWalletSubmission?.()
+  // The durable guard must be written BEFORE the invoice reaches WebLN.
+  // An asynchronous storage callback may reject; in that case do not send.
+  await onWalletSubmission?.({ invoice })
   try {
     const result = await window.webln.sendPayment(invoice)
     // A successful WebLN response is still wallet-reported, not an independent

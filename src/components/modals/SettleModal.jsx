@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from 'react'
 import QRCodeLib from 'qrcode'
 import { ModalShell, Button, truncate } from '../ui'
 import { payLightningAddress, generateInvoiceForAddress, hasWebLN } from '../../lib/lightning'
+import { beginPaymentAttempt, getPaymentAttempt, updatePaymentAttempt, releaseVerifiedUnpaidAttempt, withPaymentOperationLock } from '../../lib/payment-attempts'
+import { pendingOutbox } from '../../lib/nostr'
 
 function QRCode({ value, size = 200 }) {
   const [dataUrl, setDataUrl] = useState('')
@@ -23,7 +25,7 @@ function QRCode({ value, size = 200 }) {
   )
 }
 
-export default function SettleModal({ debt, profiles, groupId, onClose, onSettled }) {
+export default function SettleModal({ debt, profiles, groupId, myPubkey, onClose, onSettled }) {
   const [status,  setStatus]  = useState('idle')
   const [errMsg,  setErrMsg]  = useState('')
   const [invoice, setInvoice] = useState('')
@@ -33,6 +35,10 @@ export default function SettleModal({ debt, profiles, groupId, onClose, onSettle
   const [walletSubmissionStarted, setWalletSubmissionStarted] = useState(false)
   const [walletOutcomeUnknown, setWalletOutcomeUnknown] = useState(false)
   const [walletHistoryChecked, setWalletHistoryChecked] = useState(false)
+  const [attempt, setAttempt] = useState(null)
+  const [attemptError, setAttemptError] = useState('')
+  const [recoveryMessage, setRecoveryMessage] = useState('')
+  const scope = { account: myPubkey, groupId, to: debt.to }
   const payInFlight = useRef(false)
   const recordInFlight = useRef(false)
 
@@ -41,28 +47,83 @@ export default function SettleModal({ debt, profiles, groupId, onClose, onSettle
   const lnAddress = toProfile.lud16 || '' // lud06 is bech32 LNURL, not a user@domain Lightning Address
   const webln     = hasWebLN()
 
+  // Refresh and account changes must not reset the wallet-submission guard.
+  useEffect(() => {
+    setWalletHistoryChecked(false)
+    const refresh = () => {
+      if (myPubkey !== debt.from) {
+        setAttemptError('Identità Nostr diversa dal debitore: pagamento bloccato')
+        setAttempt(null)
+        return
+      }
+      try {
+        setAttempt(getPaymentAttempt({ account: myPubkey, groupId, to: debt.to }))
+        setAttemptError('')
+      } catch (error) {
+        setAttempt(null)
+        setAttemptError(error.message)
+      }
+    }
+    refresh()
+    window.addEventListener('storage', refresh)
+    return () => window.removeEventListener('storage', refresh)
+  }, [myPubkey, groupId, debt.from, debt.to])
+
+  const settlementQueued = () => {
+    // Do not create a second signed settlement when an ACK is still uncertain.
+    try {
+      return pendingOutbox(myPubkey).some(({ event }) =>
+        event.kind === 9001 && event.tags?.some(t => t[0] === 'g' && t[1] === groupId))
+    } catch { return true } // Unreadable outbox = fail closed.
+  }
+
   const handlePay = async () => {
-    if (payInFlight.current || sent || walletSubmissionStarted || deliveryUncertain) return
+    if (payInFlight.current || sent || walletSubmissionStarted || deliveryUncertain || attempt || attemptError) return
     payInFlight.current = true
     let walletCompleted = false
+    let submitted = false
     setStatus('resolving'); setErrMsg('')
     try {
-      await payLightningAddress(lnAddress, debt.amount, {
-        onWalletSubmission: () => setWalletSubmissionStarted(true),
+      // Web Locks serialize submissions between same-origin tabs when supported.
+      await withPaymentOperationLock(scope, async () => {
+        // Recheck synchronously, not only via React state: stale UI must not pay.
+        const existing = getPaymentAttempt(scope)
+        if (existing) {
+          setAttempt(existing)
+          throw new Error('Esiste già un tentativo: verifica il wallet prima di ripagare')
+        }
+        await payLightningAddress(lnAddress, debt.amount, {
+          onWalletSubmission: async () => {
+            // A signer switch while the invoice was resolving must fail closed.
+            const activeSigner = await window.nostr?.getPublicKey?.()
+            if (activeSigner !== myPubkey) throw new Error('Account Nostr cambiato: pagamento annullato prima dell’invio al wallet')
+            // Storage write MUST succeed before invoking the external wallet.
+            const record = beginPaymentAttempt(scope, debt.amount)
+            submitted = true
+            setAttempt(record)
+            setWalletSubmissionStarted(true)
+          },
+        })
+        walletCompleted = true
+        setSent(true)
+        setAttempt(updatePaymentAttempt(scope, 'wallet-reported'))
+        const claimEventId = await onSettled(groupId, { from: debt.from, to: debt.to, amount: debt.amount,
+          method: 'webln', walletReported: true })
+        if (!/^[a-f0-9]{64}$/.test(claimEventId || '')) throw new Error('ID della dichiarazione Nostr non disponibile: verifica la cronologia')
+      setAttempt(updatePaymentAttempt(scope, 'claim-pending', { claimEventId }))
+        setStatus('pending')
       })
-      // A wallet success response is not an independent settlement proof.
-      // Do NOT mark the balance paid until the recipient signs a confirmation.
-      walletCompleted = true
-      setSent(true)
-      await onSettled(groupId, { from: debt.from, to: debt.to, amount: debt.amount,
-        method: 'webln', walletReported: true })
-      setStatus('pending')
     } catch (e) {
+      if (submitted && !walletCompleted) {
+        // All failures after handing an invoice to WebLN remain ambiguous.
+        try { setAttempt(updatePaymentAttempt(scope, 'outcome-unknown')) }
+        catch { /* submitted lock remains persisted */ }
+      }
       if (['RELAY_PUBLICATION_UNKNOWN', 'OUTBOX_PENDING'].includes(e.code)) setDeliveryUncertain(true)
-      if (e.code === 'WALLET_PAYMENT_OUTCOME_UNKNOWN') setWalletOutcomeUnknown(true)
-      setErrMsg((walletCompleted ? 'Il wallet ha segnalato il pagamento, ma non siamo riusciti a pubblicare la richiesta. NON pagare di nuovo. ' :
-        e.code === 'WALLET_PAYMENT_OUTCOME_UNKNOWN' ? 'Il wallet potrebbe aver pagato. NON ripetere il pagamento. ' :
-        'Errore prima dell’invio al wallet: nessun pagamento richiesto. ') + (e.message || 'Errore'))
+      if (e.code === 'WALLET_PAYMENT_OUTCOME_UNKNOWN' || submitted) setWalletOutcomeUnknown(true)
+      setErrMsg((walletCompleted ? 'Il wallet ha segnalato il pagamento, ma la richiesta non è confermata sui relay. NON pagare di nuovo. ' :
+        submitted ? 'Esito del wallet incerto. NON ripetere il pagamento. ' :
+        'Nessuna nuova richiesta di pagamento inviata al wallet. ') + (e.message || 'Errore'))
       setStatus('error')
     } finally {
       payInFlight.current = false
@@ -70,7 +131,7 @@ export default function SettleModal({ debt, profiles, groupId, onClose, onSettle
   }
 
   const handleShowQR = async () => {
-    if (walletSubmissionStarted || deliveryUncertain) return
+    if (walletSubmissionStarted || deliveryUncertain || attempt || attemptError) return
     setStatus('resolving'); setErrMsg('')
     try {
       const pr = await generateInvoiceForAddress(lnAddress, debt.amount)
@@ -84,12 +145,20 @@ export default function SettleModal({ debt, profiles, groupId, onClose, onSettle
   }
 
   const handleManual = async () => {
-    if (recordInFlight.current || (walletOutcomeUnknown && !walletHistoryChecked)) return
+    if (recordInFlight.current || attemptError || attempt?.status === 'claim-pending' ||
+        (attempt && !walletHistoryChecked) || settlementQueued()) return
     recordInFlight.current = true
     setStatus('recording'); setErrMsg('')
     try {
-      await onSettled(groupId, { from: debt.from, to: debt.to, amount: debt.amount,
-        method: sent ? 'webln' : 'manual', walletReported: sent })
+      if (attempt?.status === 'submitted') {
+        setAttempt(updatePaymentAttempt(scope, 'outcome-unknown'))
+      }
+      // When recovering a timed-out wallet call, this is a user declaration,
+      // not an independently verified WebLN receipt.
+      const walletReported = !!(sent || attempt?.status === 'wallet-reported')
+      const claimEventId = await onSettled(groupId, { from: debt.from, to: debt.to, amount: debt.amount,
+        method: walletReported ? 'webln' : 'manual', walletReported })
+      if (attempt) setAttempt(updatePaymentAttempt(scope, 'claim-pending', { claimEventId }))
       setStatus('pending')
     } catch (e) {
       if (['RELAY_PUBLICATION_UNKNOWN', 'OUTBOX_PENDING'].includes(e.code)) setDeliveryUncertain(true)
@@ -97,6 +166,24 @@ export default function SettleModal({ debt, profiles, groupId, onClose, onSettle
     } finally {
       recordInFlight.current = false
     }
+  }
+
+  const handleVerifiedUnpaid = () => {
+    if (!attempt || !walletHistoryChecked || attempt.status === 'claim-pending' || settlementQueued()) return
+    const phrase = window.prompt('Dopo aver controllato il wallet E contattato il destinatario, scrivi NESSUN PAGAMENTO solo se sei certo che non sono stati trasferiti satoshi:')
+    if (phrase !== 'NESSUN PAGAMENTO') return
+    try {
+      releaseVerifiedUnpaidAttempt(scope, phrase)
+      setAttempt(null)
+      setWalletSubmissionStarted(false)
+      setWalletOutcomeUnknown(false)
+      setWalletHistoryChecked(false)
+      setSent(false)
+      setDeliveryUncertain(false)
+      setErrMsg('')
+      setStatus('idle')
+      setRecoveryMessage('Tentativo sbloccato manualmente. Verifica nuovamente il saldo prima di pagare.')
+    } catch (error) { setAttemptError(error.message) }
   }
 
   return (
@@ -120,7 +207,7 @@ export default function SettleModal({ debt, profiles, groupId, onClose, onSettle
       </div>
 
       {/* QR */}
-      {status === 'qr' && invoice && (
+      {status === 'qr' && invoice && !attempt && !attemptError && (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
           <div style={{ fontFamily: 'var(--pixel)', fontSize: 7, color: 'var(--text3)', textAlign: 'center' }}>
             SCANSIONA CON QUALSIASI WALLET
@@ -138,13 +225,27 @@ export default function SettleModal({ debt, profiles, groupId, onClose, onSettle
       {status === 'recording' && <div style={{ textAlign: 'center', fontFamily: 'var(--pixel)', fontSize: 8 }}>SALVATAGGIO SU NOSTR...</div>}
       {status === 'error'     && <div style={{ fontFamily: 'var(--pixel)', fontSize: 8, color: 'var(--red)', border: '2px solid var(--red)', padding: '10px', textAlign: 'center', lineHeight: 2 }}>{errMsg}</div>}
 
-      {walletOutcomeUnknown && !deliveryUncertain && <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--red)', lineHeight: 1.7 }}>
-        Il risultato WebLN non è affidabile. Controlla la cronologia del wallet e chiedi al destinatario prima di dichiarare un pagamento. Non premere PAY di nuovo: potrebbe inviare altri satoshi.
-        <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: 10 }}>
-          <input type="checkbox" checked={walletHistoryChecked} onChange={e => setWalletHistoryChecked(e.target.checked)} />
-          Ho verificato nella cronologia che il pagamento è stato eseguito e voglio richiedere la conferma del destinatario.
-        </label>
+      {attemptError && <div role="alert" style={{ color: 'var(--red)', fontFamily: 'var(--mono)', fontSize: 11 }}>Archivio Lightning non leggibile: {attemptError}. Nessun pagamento consentito.</div>}
+      {attempt && <div role="status" style={{ border: '2px solid var(--red)', padding: 12, fontFamily: 'var(--mono)', fontSize: 11, lineHeight: 1.7 }}>
+        TENTATIVO LIGHTNING SALVATO — {attempt.status.toUpperCase()}<br />
+        {attempt.amount} sat · {new Date(attempt.startedAt).toLocaleString()}<br />
+        NON PAGARE DI NUOVO: questa protezione rimane attiva anche dopo un refresh.
+        {attempt.status === 'claim-pending'
+          ? <div>Richiesta registrata. Attendi la conferma firmata del destinatario.</div>
+          : <>
+            <div>Controlla la cronologia del wallet e contatta il destinatario prima di dichiarare o sbloccare il tentativo.</div>
+            <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: 10 }}>
+              <input type="checkbox" checked={walletHistoryChecked} onChange={e => setWalletHistoryChecked(e.target.checked)} />
+              Ho verificato il wallet e contattato il destinatario. So se il pagamento è stato effettuato.
+            </label>
+            <button onClick={handleVerifiedUnpaid} disabled={!walletHistoryChecked || deliveryUncertain}
+              style={{ marginTop: 10, background: 'transparent', color: 'var(--red)', border: '1px solid var(--red)', padding: 8, fontFamily: 'var(--mono)', fontSize: 10 }}>
+              SBLOCCA SOLO SE NON È STATO PAGATO
+            </button>
+          </>}
       </div>}
+      {walletOutcomeUnknown && !attempt && !deliveryUncertain && <div role="alert" style={{ color: 'var(--red)', fontFamily: 'var(--mono)', fontSize: 11 }}>Esito WebLN incerto. Non inviare altri satoshi prima di aver controllato il wallet.</div>}
+      {recoveryMessage && <div role="status" style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{recoveryMessage}</div>}
 
       {deliveryUncertain && <div style={{ fontFamily: 'var(--pixel)', fontSize: 7, color: 'var(--red)', lineHeight: 2 }}>Esito della pubblicazione incerto. Controlla la cronologia dopo una nuova sincronizzazione; non ripagare e non inviare una seconda dichiarazione ora.</div>}
 
@@ -156,15 +257,15 @@ export default function SettleModal({ debt, profiles, groupId, onClose, onSettle
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {status !== 'qr' && status !== 'pending' && (
-          <Button variant="primary" disabled={!webln || !lnAddress || sent || walletSubmissionStarted || deliveryUncertain || status === 'resolving' || status === 'recording'} onClick={handlePay}>
+          <Button variant="primary" disabled={!webln || !lnAddress || sent || walletSubmissionStarted || deliveryUncertain || !!attempt || !!attemptError || status === 'resolving' || status === 'recording'} onClick={handlePay}>
             {status === 'resolving' ? '// CONNECTING...' : '> PAY WITH ALBY'}
           </Button>
         )}
-        {lnAddress && !sent && !walletSubmissionStarted && !deliveryUncertain && status !== 'qr' && status !== 'pending' && (
+        {lnAddress && !sent && !walletSubmissionStarted && !deliveryUncertain && !attempt && !attemptError && status !== 'qr' && status !== 'pending' && (
           <Button variant="ghost" disabled={status === 'resolving' || status === 'recording'} onClick={handleShowQR}>MOSTRA QR CODE</Button>
         )}
-        {!deliveryUncertain && status !== 'pending' && status !== 'recording' && status !== 'resolving' && <button onClick={handleManual} disabled={walletOutcomeUnknown && !walletHistoryChecked} style={{ background: 'none', border: 'none', fontFamily: 'var(--pixel)', fontSize: 7, color: 'var(--text3)', cursor: 'pointer', textAlign: 'center', padding: '4px', textDecoration: 'underline', lineHeight: 2 }}>
-          {sent ? 'RIPROVA REGISTRAZIONE (NON RIPAGARE)' : walletOutcomeUnknown ? 'HO VERIFICATO IL PAGAMENTO: CHIEDI CONFERMA' : status === 'qr' ? 'HO PAGATO CON QR: CHIEDI CONFERMA' : 'DICHIARA PAGAMENTO MANUALE'}
+        {!deliveryUncertain && !attemptError && attempt?.status !== 'claim-pending' && status !== 'pending' && status !== 'recording' && status !== 'resolving' && <button onClick={handleManual} disabled={!!attempt && !walletHistoryChecked} style={{ background: 'none', border: 'none', fontFamily: 'var(--pixel)', fontSize: 7, color: 'var(--text3)', cursor: 'pointer', textAlign: 'center', padding: '4px', textDecoration: 'underline', lineHeight: 2 }}>
+          {attempt ? 'PAGAMENTO VERIFICATO: CHIEDI CONFERMA (NON RIPAGARE)' : sent ? 'RIPROVA REGISTRAZIONE (NON RIPAGARE)' : walletOutcomeUnknown ? 'HO VERIFICATO IL PAGAMENTO: CHIEDI CONFERMA' : status === 'qr' ? 'HO PAGATO CON QR: CHIEDI CONFERMA' : 'DICHIARA PAGAMENTO MANUALE'}
         </button>}
         <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)', lineHeight: 1.5 }}>
           Le dichiarazioni non riducono i debiti. Solo una conferma firmata dal destinatario aggiorna il saldo. Controlla sempre il wallet prima di dichiarare un pagamento.
