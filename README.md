@@ -84,3 +84,11 @@ La cache gruppi/profili ora è isolata per chiave Nostr e il ripristino della
 sessione richiede un signer corrispondente. Vedi [cache account](docs/ACCOUNT-CACHE-SECURITY.md).
 L'audit delle dipendenze npm e le istruzioni per gli aggiornamenti sicuri sono
 in [docs/DEPENDENCY-AUDIT.md](docs/DEPENDENCY-AUDIT.md).
+
+## Protezione dai pagamenti ripetuti
+
+I tentativi WebLN vengono salvati **prima** dell'invio al wallet. In caso di
+esito incerto, la schermata rimane bloccata anche dopo un refresh: l'utente
+può recuperare la dichiarazione senza inviare di nuovo satoshi. La protezione
+è locale al browser e non sostituisce la verifica Lightning. Vedi
+[docs/LIGHTNING-PAYMENT-JOURNAL.md](docs/LIGHTNING-PAYMENT-JOURNAL.md).

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { simplifyDebts } from '../lib/balances'
 import { approvedSettlements, settlementStatus } from '../lib/settlement-status'
+import { getPaymentAttempt } from '../lib/payment-attempts'
 import { Avatar, Tag, Empty, SectionHeader, Button, truncate } from '../components/ui'
 import { hexToNpub } from '../lib/nostr'
 
@@ -112,6 +113,11 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
             const isMe     = d.from === myPubkey
             const hasPending = settlements.some(s => s.from === d.from && s.to === d.to &&
               settlementStatus(s, confirmations) !== 'confirmed')
+            let localAttempt = false
+            if (isMe) {
+              try { localAttempt = !!getPaymentAttempt({ account: myPubkey, groupId: group.id, to: d.to }) }
+              catch { localAttempt = true } // Corrupted/unavailable storage: never present as safe to pay.
+            }
             return (
               <div key={i} style={{ background: 'var(--surface)', border: `2px solid ${isMe ? 'var(--red)' : 'var(--blue)'}`, padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 12 }}>
                 <Avatar pubkey={d.from} />
@@ -124,11 +130,11 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
                   <div style={{ fontFamily: 'var(--pixel)', fontSize: 8, color: 'var(--blue)' }}>{sats(d.amount)}</div>
                 </div>
                 {isMe && (
-                  <button disabled={hasPending} onClick={() => onSettle(d)} style={{
+                  <button disabled={hasPending && !localAttempt} onClick={() => onSettle(d)} style={{
                     fontFamily: 'var(--pixel)', fontSize: 8, background: 'var(--blue)', color: '#fff',
                     border: '2px solid var(--blue)', padding: '7px 12px', cursor: 'pointer',
                   }}>
-                    {hasPending ? 'IN ATTESA' : 'PAY ⚡'}
+                    {localAttempt ? 'VERIFICA ⚡' : hasPending ? 'IN ATTESA' : 'PAY ⚡'}
                   </button>
                 )}
               </div>

@@ -4,6 +4,7 @@ import { verifyCachedSigner } from '../lib/session-identity'
 import { publishEvent, fetchProfile, fetchGroups, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
 import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION } from '../lib/constants'
 import { isNewerGroupDefinition, validPubkey } from '../lib/event-validation'
+import { releaseConfirmedPaymentAttempt } from '../lib/payment-attempts'
 import { isConfirmedSettlement } from '../lib/settlement-status'
 
 const randId = () => crypto.randomUUID()
@@ -191,6 +192,20 @@ export const useStore = create((set, get) => ({
           saveGroups(get().pubkey, groups)
           return { groups }
         })
+        // This callback receives an event verified by the relay pool, not an
+        // untrusted cached snapshot. A wallet lock is released only when the
+        // recipient's signed confirmation references the exact local claim.
+        if (confirmation.from === subscriptionOwner) {
+          const settlement = get().getGroup(groupId)?.settlements?.find(s =>
+            s._eventId === confirmation.settlementEventId && s.from === confirmation.from &&
+            s.to === confirmation.to && s.amount === confirmation.amount)
+          if (settlement) {
+            try {
+              releaseConfirmedPaymentAttempt(
+                { account: subscriptionOwner, groupId, to: settlement.to }, settlement._eventId)
+            } catch { /* Keep the safety lock on any storage error. */ }
+          }
+        }
       },
       () => {}
     )
@@ -324,6 +339,7 @@ export const useStore = create((set, get) => ({
       saveGroups(get().pubkey, groups)
       return { groups, toast: 'Richiesta registrata: in attesa di conferma del destinatario' }
     })
+    return signed.id // Lets the durable payment journal track the exact declaration.
   },
 
   // ─── PAYEE CONFIRMATION (independent Nostr signature) ────────────────────

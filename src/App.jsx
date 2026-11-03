@@ -189,7 +189,7 @@ export default function App() {
       )}
       {modal === 'settle' && settleDebt && (
         <SettleModal
-          debt={settleDebt} profiles={profiles} groupId={liveGroup?.id}
+          debt={settleDebt} profiles={profiles} groupId={liveGroup?.id} myPubkey={pubkey}
           onSettled={async (gid, data) => await recordSettlement(gid, data)}
           onClose={() => { setModal(null); setSettleDebt(null) }}
         />
