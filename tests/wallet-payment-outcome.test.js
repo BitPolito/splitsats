@@ -1,10 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { payLightningAddress } from '../src/lib/lightning.js'
+import { createSignedInvoice, TEST_PREIMAGE } from './helpers/bolt11-fixture.js'
 
-const PREIMAGE = 'ab'.repeat(32)
+const PREIMAGE = TEST_PREIMAGE
 const ADDRESS = 'alice@example.com'
-const INVOICE = 'lnbc100n-example-test-invoice'
+const INVOICE = createSignedInvoice({ amountMsats: 100000, preimageHex: PREIMAGE })
 
 async function withWallet({ metadata = { minSendable: 1000, maxSendable: 1_000_000 },
   paymentResult = { preimage: PREIMAGE },
@@ -73,6 +74,29 @@ test('missing or malformed WebLN preimage is not treated as success', async () =
       })
     })
   }
+})
+
+test('wallet-reported 64-hex preimage with wrong hash is uncertain and blocks settlement', async () => {
+  await withWallet({ paymentResult: { preimage: 'ff'.repeat(32) } }, async trace => {
+    await assert.rejects(payLightningAddress(ADDRESS, 100), {
+      code: 'WALLET_PAYMENT_OUTCOME_UNKNOWN',
+    })
+    assert.equal(trace.filter(e => Array.isArray(e) && e[0] === 'sendPayment').length, 1)
+  })
+})
+
+test('invoice amount tampering is stopped before calling WebLN', async () => {
+  const oldFetch = globalThis.fetch
+  await withWallet({}, async trace => {
+    globalThis.fetch = async url => ({ ok: true, json: async () => url.includes('amount=')
+      ? { pr: createSignedInvoice({ amountMsats: 200000 }) }
+      : { minSendable: 1000, maxSendable: 1000000 } })
+    let submitted = 0
+    await assert.rejects(payLightningAddress(ADDRESS, 100, { onWalletSubmission: () => submitted++ }), /importo diverso/)
+    assert.equal(submitted, 0)
+    assert.equal(trace.some(e => Array.isArray(e) && e[0] === 'sendPayment'), false)
+  })
+  globalThis.fetch = oldFetch
 })
 
 test('invoice lookup failure occurs before wallet submission and permits a safe retry', async () => {

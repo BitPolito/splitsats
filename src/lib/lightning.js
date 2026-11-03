@@ -1,4 +1,5 @@
 import { beginPaymentAttempt, getPaymentAttempt, withPaymentOperationLock } from './payment-attempts.js'
+import { validateBolt11Invoice, matchesPaymentPreimage } from './bolt11.js'
 
 // ─── Lightning / WebLN helpers ────────────────────────────────────────────────
 // LNURL calls go through /api/lnurl (Vercel Node.js Function in prod,
@@ -22,16 +23,21 @@ export async function resolveLightningAddress(address) {
 }
 
 // ── Step 2: fetch BOLT11 invoice ──
-export async function fetchInvoice(address, amountSats) {
+export async function fetchInvoiceDetails(address, amountSats) {
   if (!Number.isSafeInteger(amountSats) || amountSats <= 0 ||
       amountSats > Math.floor(Number.MAX_SAFE_INTEGER / 1000)) {
     throw new Error('Importo in satoshi non valido')
   }
   const res = await fetch(`/api/lnurl?address=${encodeURIComponent(address)}&amount=${amountSats * 1000}`)
-  const data    = await res.json()
+  const data = await res.json()
   if (!res.ok || data.error) throw new Error(data.error || `Errore HTTP ${res.status}`)
   if (!data.pr) throw new Error('Nessuna invoice ricevuta dal server')
-  return data.pr
+  const details = validateBolt11Invoice(data.pr, { expectedMsats: amountSats * 1000, network: 'bc' })
+  return { invoice: data.pr, paymentHash: details.paymentHash }
+}
+
+export async function fetchInvoice(address, amountSats) {
+  return (await fetchInvoiceDetails(address, amountSats)).invoice
 }
 
 // ── Full pay flow (with WebLN) ──
@@ -52,7 +58,7 @@ export async function payLightningAddress(address, amountSats, { onWalletSubmiss
   const maxSats = Math.floor((meta.maxSendable || 1e10) / 1000)
   if (amountSats < minSats) throw new Error(`Minimo: ${minSats.toLocaleString()} sats`)
   if (amountSats > maxSats) throw new Error(`Massimo: ${maxSats.toLocaleString()} sats`)
-  const invoice = await fetchInvoice(address, amountSats)
+  const { invoice, paymentHash } = await fetchInvoiceDetails(address, amountSats)
   // The callback fires immediately before handing the invoice to WebLN, so the
   // UI can lock the payment button before the wallet has a chance to settle.
   // The durable guard must be written BEFORE the invoice reaches WebLN.
@@ -62,8 +68,8 @@ export async function payLightningAddress(address, amountSats, { onWalletSubmiss
     const result = await window.webln.sendPayment(invoice)
     // A successful WebLN response is still wallet-reported, not an independent
     // Lightning settlement proof. Missing/malformed preimages remain uncertain.
-    if (typeof result?.preimage !== 'string' || !/^[0-9a-f]{64}$/i.test(result.preimage)) {
-      throw new Error('WebLN non ha fornito una preimage valida')
+    if (!matchesPaymentPreimage(result?.preimage, paymentHash)) {
+      throw new Error('Preimage del wallet non corrispondente alla payment hash della invoice')
     }
     return { preimage: result.preimage, invoice }
   } catch (error) {

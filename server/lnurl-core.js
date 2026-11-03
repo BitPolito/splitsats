@@ -4,6 +4,7 @@
 import { lookup } from 'node:dns'
 import { request as httpsRequest } from 'node:https'
 import { isIP } from 'node:net'
+import { validateBolt11Invoice, sha256Utf8Hex } from '../src/lib/bolt11.js'
 
 const MAX_RESPONSE_BYTES = 64 * 1024
 const UPSTREAM_TIMEOUT_MS = 7000
@@ -134,6 +135,19 @@ function validatePayMetadata(value) {
     throw new LnurlError('Metadati LNURL-pay non validi', 502)
   }
   validateHttpsUrl(value.callback)
+  // LNURL-pay defines metadata as a raw JSON *string*. Preserve its bytes:
+  // BOLT11's h tag commits to SHA256 of that exact string, not re-serialized JSON.
+  if (typeof value.metadata !== 'string' || value.metadata.length > MAX_RESPONSE_BYTES) {
+    throw new LnurlError('Metadata LNURL-pay mancanti o troppo grandi', 502)
+  }
+  let entries
+  try { entries = JSON.parse(value.metadata) }
+  catch { throw new LnurlError('Metadata LNURL-pay non validi', 502) }
+  if (!Array.isArray(entries) || !entries.length ||
+      !entries.every(e => Array.isArray(e) && e.length >= 2 && typeof e[0] === 'string') ||
+      !entries.some(e => e[0] === 'text/plain' && typeof e[1] === 'string')) {
+    throw new LnurlError('Metadata LNURL-pay senza text/plain', 502)
+  }
   return value
 }
 
@@ -176,11 +190,17 @@ export async function processLnurlRequest(method, params, getJson = secureGetJso
     const callbackUrl = validateHttpsUrl(metadata.callback)
     callbackUrl.searchParams.set('amount', String(amount))
     const invoice = await getJson(callbackUrl.toString())
-    if (invoice.status === 'ERROR') {
+    if (!invoice || invoice.status === 'ERROR') {
       throw new LnurlError('Il server Lightning ha rifiutato la richiesta', 502)
     }
-    if (typeof invoice.pr !== 'string' || !/^ln(?:bc|tb|bcrt)[0-9a-z]+$/i.test(invoice.pr) || invoice.pr.length > 6000) {
-      throw new LnurlError('Invoice BOLT11 non valida', 502)
+    try {
+      validateBolt11Invoice(invoice.pr, {
+        expectedMsats: amount,
+        expectedDescriptionHash: sha256Utf8Hex(metadata.metadata),
+        network: 'bc',
+      })
+    } catch {
+      throw new LnurlError('Invoice BOLT11 non valida: importo, hash metadata, rete, firma o scadenza', 502)
     }
     return { status: 200, body: { pr: invoice.pr } }
   } catch (error) {
