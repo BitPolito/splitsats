@@ -16,5 +16,8 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
+      # Only production dependencies are included in the deployed application.
+      # Fail on moderate-or-higher advisories; audit full dev dependency tree separately.
+      - run: npm audit --omit=dev --audit-level=moderate
       - run: npm test
       - run: npm run build
