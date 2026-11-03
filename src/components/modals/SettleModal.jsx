@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import QRCodeLib from 'qrcode'
 import { ModalShell, Button, truncate } from '../ui'
-import { payLightningAddress, generateInvoiceForAddress, hasWebLN } from '../../lib/lightning'
+import { payLightningAddress, prepareExternalWalletInvoice, hasWebLN } from '../../lib/lightning'
 import { beginPaymentAttempt, getPaymentAttempt, updatePaymentAttempt, releaseVerifiedUnpaidAttempt, withPaymentOperationLock } from '../../lib/payment-attempts'
 import { pendingOutbox } from '../../lib/nostr'
 
@@ -40,6 +40,7 @@ export default function SettleModal({ debt, profiles, groupId, myPubkey, onClose
   const [recoveryMessage, setRecoveryMessage] = useState('')
   const scope = { account: myPubkey, groupId, to: debt.to }
   const payInFlight = useRef(false)
+  const qrInFlight = useRef(false)
   const recordInFlight = useRef(false)
 
   const toProfile = profiles[debt.to] || {}
@@ -78,7 +79,7 @@ export default function SettleModal({ debt, profiles, groupId, myPubkey, onClose
   }
 
   const handlePay = async () => {
-    if (payInFlight.current || sent || walletSubmissionStarted || deliveryUncertain || attempt || attemptError) return
+    if (payInFlight.current || qrInFlight.current || sent || walletSubmissionStarted || deliveryUncertain || attempt || attemptError || settlementQueued()) return
     payInFlight.current = true
     let walletCompleted = false
     let submitted = false
@@ -131,17 +132,51 @@ export default function SettleModal({ debt, profiles, groupId, myPubkey, onClose
   }
 
   const handleShowQR = async () => {
-    if (walletSubmissionStarted || deliveryUncertain || attempt || attemptError) return
+    if (qrInFlight.current || payInFlight.current || status === 'resolving' || status === 'recording' ||
+        walletSubmissionStarted || deliveryUncertain || attempt || attemptError || settlementQueued()) return
+    qrInFlight.current = true
     setStatus('resolving'); setErrMsg('')
     try {
-      const pr = await generateInvoiceForAddress(lnAddress, debt.amount)
-      setInvoice(pr); setStatus('qr')
-    } catch (e) { setErrMsg(e.message); setStatus('error') }
+      const { invoice: pr, attempt: record } = await prepareExternalWalletInvoice(
+        lnAddress, debt.amount, scope, {
+          ensureSigner: async () => {
+            const activeSigner = await window.nostr?.getPublicKey?.()
+            if (myPubkey !== debt.from || activeSigner !== myPubkey) {
+              throw new Error('Account Nostr diverso dal debitore: QR annullato prima della visualizzazione')
+            }
+            if (settlementQueued()) throw new Error('Dichiarazione Nostr in coda: non generare altri pagamenti')
+          },
+        })
+      setAttempt(record)
+      setInvoice(pr)
+      setCopied(false)
+      setStatus('qr')
+    } catch (e) {
+      // Surface an attempt created in another tab instead of silently retrying.
+      try { setAttempt(getPaymentAttempt(scope)) }
+      catch (error) { setAttemptError(error.message) }
+      setErrMsg(e.message || 'Non è stato possibile preparare il QR')
+      setStatus('error')
+    } finally {
+      qrInFlight.current = false
+    }
   }
 
   const handleCopy = async () => {
-    try { await navigator.clipboard.writeText(invoice); setCopied(true) }
-    catch { setErrMsg('Impossibile copiare la invoice') }
+    if (!invoice || attempt?.status !== 'submitted') return
+    try {
+      // Revalidate the persisted guard and active account, even if the UI is stale.
+      const saved = getPaymentAttempt(scope)
+      if (saved?.status !== 'submitted' || saved.amount !== debt.amount ||
+          await window.nostr?.getPublicKey?.() !== myPubkey) {
+        throw new Error('Tentativo o account modificato: QR non copiato')
+      }
+      await navigator.clipboard.writeText(invoice)
+      setCopied(true)
+    } catch (error) {
+      setErrMsg(error.message || 'Impossibile copiare la invoice')
+      setStatus('error')
+    }
   }
 
   const handleManual = async () => {
@@ -175,6 +210,8 @@ export default function SettleModal({ debt, profiles, groupId, myPubkey, onClose
     try {
       releaseVerifiedUnpaidAttempt(scope, phrase)
       setAttempt(null)
+      setInvoice('')
+      setCopied(false)
       setWalletSubmissionStarted(false)
       setWalletOutcomeUnknown(false)
       setWalletHistoryChecked(false)
@@ -207,10 +244,14 @@ export default function SettleModal({ debt, profiles, groupId, myPubkey, onClose
       </div>
 
       {/* QR */}
-      {status === 'qr' && invoice && !attempt && !attemptError && (
+      {status === 'qr' && invoice && attempt?.status === 'submitted' && !attemptError && (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
           <div style={{ fontFamily: 'var(--pixel)', fontSize: 7, color: 'var(--text3)', textAlign: 'center' }}>
             SCANSIONA CON QUALSIASI WALLET
+          </div>
+          <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--red)', textAlign: 'center', lineHeight: 1.5 }}>
+            QR registrato localmente. Se il wallet paga, NON richiedere un secondo QR:
+            controlla la cronologia e chiedi la conferma del destinatario.
           </div>
           <QRCode value={invoice} size={200} />
           <button onClick={handleCopy} style={{ border: '2px solid var(--blue)', background: 'transparent', padding: '6px 14px', fontFamily: 'var(--pixel)', fontSize: 7, color: copied ? 'var(--green)' : 'var(--blue)', cursor: 'pointer' }}>

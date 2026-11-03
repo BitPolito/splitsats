@@ -4,7 +4,7 @@ import {
   getPaymentAttempt, beginPaymentAttempt, updatePaymentAttempt,
   releaseConfirmedPaymentAttempt, releaseVerifiedUnpaidAttempt,
 } from '../src/lib/payment-attempts.js'
-import { payLightningAddress } from '../src/lib/lightning.js'
+import { payLightningAddress, prepareExternalWalletInvoice } from '../src/lib/lightning.js'
 
 const A = 'a'.repeat(64)
 const B = 'b'.repeat(64)
@@ -234,5 +234,84 @@ test('async signer validation callback rejects before the wallet is invoked', as
     else globalThis.window = oldWindow
     if (oldFetch === undefined) delete globalThis.fetch
     else globalThis.fetch = oldFetch
+  }
+})
+
+
+test('external QR is returned only after persisting the attempt and cannot be issued again', async () => {
+  const f = setup()
+  const oldFetch = globalThis.fetch
+  let fetches = 0
+  try {
+    globalThis.fetch = async () => {
+      fetches++
+      return { ok: true, json: async () => ({ pr: 'lnbc-qr-test' }) }
+    }
+    const { invoice, attempt } = await prepareExternalWalletInvoice('alice@example.org', 12, identity, {
+      ensureSigner: async () => { assert.equal(getPaymentAttempt(identity), null) },
+    })
+    assert.equal(invoice, 'lnbc-qr-test')
+    assert.equal(attempt.status, 'submitted')
+    assert.equal(getPaymentAttempt(identity)?.amount, 12)
+    assert.equal(fetches, 1)
+    await assert.rejects(
+      prepareExternalWalletInvoice('alice@example.org', 12, identity, { ensureSigner: async () => {} }),
+      { code: 'PAYMENT_ATTEMPT_PENDING' },
+    )
+    assert.equal(fetches, 1, 'must reject a duplicate BEFORE asking provider for another invoice')
+    assert.equal([...f.db.values()].join('\n').includes(invoice), false, 'do not persist private invoices')
+  } finally {
+    f.done()
+    if (oldFetch === undefined) delete globalThis.fetch
+    else globalThis.fetch = oldFetch
+  }
+})
+
+test('external QR fails closed if signer changes or local storage is unavailable', async () => {
+  const f = setup()
+  const oldFetch = globalThis.fetch
+  try {
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ pr: 'lnbc-qr-test' }) })
+    await assert.rejects(prepareExternalWalletInvoice('alice@example.org', 25, identity, {
+      ensureSigner: async () => { throw Error('Signer changed') },
+    }), /Signer changed/)
+    assert.equal(getPaymentAttempt(identity), null)
+    await assert.rejects(prepareExternalWalletInvoice('alice@example.org', 25, identity),
+      /Verifica dell’account Nostr obbligatoria/)
+    f.store.setItem = () => { throw Error('Quota exceeded') }
+    await assert.rejects(prepareExternalWalletInvoice('alice@example.org', 25, identity, {
+      ensureSigner: async () => {},
+    }), { code: 'PAYMENT_ATTEMPT_STORAGE_ERROR' })
+    assert.equal(f.db.size, 0)
+  } finally {
+    f.done()
+    if (oldFetch === undefined) delete globalThis.fetch
+    else globalThis.fetch = oldFetch
+  }
+})
+
+test('QR reservation and WebLN share the same debtor/group/payee lock', async () => {
+  const f = setup()
+  const oldFetch = globalThis.fetch
+  let walletSubmissions = 0
+  const oldWindow = globalThis.window
+  try {
+    globalThis.fetch = async url => ({ ok: true, json: async () => url.includes('amount=')
+      ? { pr: 'lnbc-qr-test' } : { minSendable: 1000, maxSendable: 100000 } })
+    await prepareExternalWalletInvoice('alice@example.org', 12, identity, { ensureSigner: async () => {} })
+    globalThis.window = { webln: {
+      enable: async () => {},
+      sendPayment: async () => { walletSubmissions++; return { preimage: 'f'.repeat(64) } },
+    } }
+    await assert.rejects(payLightningAddress('alice@example.org', 12, {
+      onWalletSubmission: () => beginPaymentAttempt(identity, 12),
+    }), { code: 'PAYMENT_ATTEMPT_PENDING' })
+    assert.equal(walletSubmissions, 0)
+  } finally {
+    f.done()
+    if (oldFetch === undefined) delete globalThis.fetch
+    else globalThis.fetch = oldFetch
+    if (oldWindow === undefined) delete globalThis.window
+    else globalThis.window = oldWindow
   }
 })
