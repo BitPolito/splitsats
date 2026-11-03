@@ -33,7 +33,16 @@ export async function fetchInvoice(address, amountSats) {
 }
 
 // ── Full pay flow (with WebLN) ──
-export async function payLightningAddress(address, amountSats) {
+// Once sendPayment has been invoked, a rejected promise does NOT prove the wallet
+// failed to pay. Never automatically retry the invoice after this error.
+function uncertainWalletOutcome(cause) {
+  const error = new Error('Esito del wallet incerto: controlla la cronologia Lightning prima di altre operazioni.')
+  error.code = 'WALLET_PAYMENT_OUTCOME_UNKNOWN'
+  error.cause = cause
+  return error
+}
+
+export async function payLightningAddress(address, amountSats, { onWalletSubmission } = {}) {
   await enableWebLN()
   if (window.webln.__splitsatsMock) throw new Error('Wallet simulato: nessun pagamento reale. Non usare il mock per saldare debiti.')
   const meta    = await resolveLightningAddress(address)
@@ -42,8 +51,20 @@ export async function payLightningAddress(address, amountSats) {
   if (amountSats < minSats) throw new Error(`Minimo: ${minSats.toLocaleString()} sats`)
   if (amountSats > maxSats) throw new Error(`Massimo: ${maxSats.toLocaleString()} sats`)
   const invoice = await fetchInvoice(address, amountSats)
-  const result  = await window.webln.sendPayment(invoice)
-  return { preimage: result.preimage, invoice }
+  // The callback fires immediately before handing the invoice to WebLN, so the
+  // UI can lock the payment button before the wallet has a chance to settle.
+  onWalletSubmission?.()
+  try {
+    const result = await window.webln.sendPayment(invoice)
+    // A successful WebLN response is still wallet-reported, not an independent
+    // Lightning settlement proof. Missing/malformed preimages remain uncertain.
+    if (typeof result?.preimage !== 'string' || !/^[0-9a-f]{64}$/i.test(result.preimage)) {
+      throw new Error('WebLN non ha fornito una preimage valida')
+    }
+    return { preimage: result.preimage, invoice }
+  } catch (error) {
+    throw uncertainWalletOutcome(error)
+  }
 }
 
 // ── QR fallback: generate invoice without WebLN ──
