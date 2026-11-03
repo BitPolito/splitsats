@@ -4,6 +4,7 @@ import { verifyCachedSigner } from '../lib/session-identity'
 import { publishEvent, fetchProfile, fetchGroups, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
 import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION } from '../lib/constants'
 import { isNewerGroupDefinition, validPubkey } from '../lib/event-validation'
+import { groupAddress } from '../lib/group-history'
 import { releaseConfirmedPaymentAttempt } from '../lib/payment-attempts'
 import { isConfirmedSettlement } from '../lib/settlement-status'
 
@@ -126,7 +127,8 @@ export const useStore = create((set, get) => ({
 
   subscribeGroup: (groupId, members) => {
     const subscriptionOwner = get().pubkey
-    const memberKey = [...new Set(members)].sort().join(',')
+    const groupOwner = get().getGroup(groupId)?.pubkey || null
+    const memberKey = `${groupOwner || 'legacy'}:${[...new Set(members)].sort().join(',')}`
     if (activeSubs['exp_' + groupId] && subscribedMemberKeys[groupId] === memberKey) return
     // Close old subscriptions before replacing author filters with the new members.
     activeSubs['exp_' + groupId]?.()
@@ -152,7 +154,7 @@ export const useStore = create((set, get) => ({
           return { groups }
         })
       },
-      () => {}
+      () => {}, groupOwner
     )
 
     const unsubSet = subscribeSettlements(
@@ -174,7 +176,7 @@ export const useStore = create((set, get) => ({
           return { groups }
         })
       },
-      () => {}
+      () => {}, groupOwner
     )
 
     const unsubConf = subscribeConfirmations(
@@ -207,7 +209,7 @@ export const useStore = create((set, get) => ({
           }
         }
       },
-      () => {}
+      () => {}, groupOwner
     )
 
     activeSubs['conf_' + groupId] = unsubConf
@@ -280,10 +282,11 @@ export const useStore = create((set, get) => ({
       throw new Error('Dati della spesa non validi')
     }
 
+    if (!groupAddress(group)) throw new Error('Autore del gruppo non verificato: sincronizza prima di inviare spese')
     const expenseData = { ...expense, id: randId(), createdAt: now() }
 
     const signed = await publishEvent(pubkey, KIND_EXPENSE, expenseData, [
-      ['g', groupId],
+      ['g', groupId], ['a', groupAddress(group)],
       ['t', 'splitsats'],
       ...group.members.map(m => ['p', m]),
     ])
@@ -319,10 +322,11 @@ export const useStore = create((set, get) => ({
         !isConfirmedSettlement(s, group.confirmations || []))) {
       throw new Error('Hai gia un pagamento in attesa di conferma verso questo destinatario')
     }
+    if (!groupAddress(group)) throw new Error('Autore del gruppo non verificato: sincronizza prima di registrare il pagamento')
     const data = { id: randId(), from, to, amount, method, walletReported, settledAt: now() }
 
     const signed = await publishEvent(pubkey, KIND_SETTLEMENT, data, [
-      ['g', groupId], ['p', to], ['t', 'splitsats'],
+      ['g', groupId], ['a', groupAddress(group)], ['p', to], ['t', 'splitsats'],
     ])
 
     if (get().pubkey !== pubkey) return
@@ -355,13 +359,14 @@ export const useStore = create((set, get) => ({
     if (isConfirmedSettlement(settlement, group.confirmations || [])) {
       throw new Error('Questo pagamento e gia confermato')
     }
+    if (!groupAddress(group)) throw new Error('Autore del gruppo non verificato: sincronizza prima di confermare')
     const data = {
       id: randId(), settlementEventId: settlement._eventId,
       from: settlement.from, to: settlement.to, amount: settlement.amount,
       confirmedAt: now(),
     }
     const signed = await publishEvent(pubkey, KIND_CONFIRMATION, data, [
-      ['g', groupId], ['e', settlement._eventId], ['p', settlement.from], ['t', 'splitsats'],
+      ['g', groupId], ['a', groupAddress(group)], ['e', settlement._eventId], ['p', settlement.from], ['t', 'splitsats'],
     ])
     if (get().pubkey !== pubkey) return
     const confirmation = { ...data, _eventId: signed.id, _pubkey: pubkey }

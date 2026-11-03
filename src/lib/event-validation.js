@@ -1,3 +1,5 @@
+import { matchesGroupAddressTag } from './group-history.js'
+
 // Validate application-level authorization and payloads AFTER the relay event's
 // Nostr signature has been checked. An authentic signature does not mean that
 // the signer is allowed to change a group's balances.
@@ -83,7 +85,8 @@ function validGroup(group) {
 
 export function parseExpenseEvent(event, group) {
   if (!isValidEnvelope(event, 9000) || !validGroup(group) ||
-      !hasSingleTag(event, 'g', group.id) || !group.members.includes(event.pubkey)) return null
+      !hasSingleTag(event, 'g', group.id) || !matchesGroupAddressTag(event, group) ||
+      !group.members.includes(event.pubkey)) return null
   const data = readObject(event.content)
   if (!data || !nonemptyString(data.id, 128) || !nonemptyString(data.description, 500) ||
       !positiveSats(data.amount) || !group.members.includes(data.paidBy) ||
@@ -101,7 +104,7 @@ export function parseExpenseEvent(event, group) {
 
 export function parseSettlementEvent(event, group) {
   if (!isValidEnvelope(event, 9001) || !validGroup(group) ||
-      !hasSingleTag(event, 'g', group.id)) return null
+      !hasSingleTag(event, 'g', group.id) || !matchesGroupAddressTag(event, group)) return null
   const data = readObject(event.content)
   // Only the debtor can attest to sending a payment. This is still NOT a
   // cryptographic proof that any Lightning transfer was completed.
@@ -122,7 +125,7 @@ export function parseSettlementEvent(event, group) {
 // the exact signed settlement event ID so a claim cannot be replaced later.
 export function parseConfirmationEvent(event, group) {
   if (!isValidEnvelope(event, 9002) || !validGroup(group) ||
-      !hasSingleTag(event, 'g', group.id)) return null
+      !hasSingleTag(event, 'g', group.id) || !matchesGroupAddressTag(event, group)) return null
   const data = readObject(event.content)
   if (!data || !HEX_EVENT.test(data.settlementEventId || '') ||
       !validPubkey(data.from) || !validPubkey(data.to) || data.from === data.to ||

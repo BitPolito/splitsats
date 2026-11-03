@@ -95,6 +95,13 @@ test('two signed clients: group, expense, debtor claim, recipient approval, refr
     expect([...relay.events.values()].filter(e => e.kind === 9000)).toHaveLength(1)
     expect([...relay.events.values()].filter(e => e.kind === 9001)).toHaveLength(1)
     expect([...relay.events.values()].filter(e => e.kind === 9002)).toHaveLength(1)
+    const createdGroup = [...relay.events.values()].find(e => e.kind === 30001)
+    const dTag = createdGroup.tags.find(t => t[0] === 'd')[1]
+    const address = `30001:${createdGroup.pubkey}:${dTag}`
+    for (const kind of [9000, 9001, 9002]) {
+      const signed = [...relay.events.values()].find(e => e.kind === kind)
+      expect(signed.tags).toContainEqual(['a', address])
+    }
   } finally {
     await Promise.allSettled([a.context.close(), b.context.close()])
   }

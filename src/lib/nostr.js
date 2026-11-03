@@ -132,12 +132,12 @@ export function fetchGroups(hexPubkey, onGroup, onDone) {
 
 // ─── Expenses ─────────────────────────────────────────────────────────────────
 
-export function subscribeExpenses(groupId, hexMembers, onExpense, onEose) {
+export function subscribeExpenses(groupId, hexMembers, onExpense, onEose, ownerPubkey = null) {
   return pool.subscribe({
     id:      'expenses_' + groupId,
     filters: [{ kinds: [9000], authors: hexMembers, '#g': [groupId], limit: 500 }],
     onEvent: (event) => {
-      const expense = parseExpenseEvent(event, { id: groupId, members: hexMembers })
+      const expense = parseExpenseEvent(event, { id: groupId, pubkey: ownerPubkey, members: hexMembers })
       if (expense) onExpense(expense)
     },
     onEose,
@@ -146,24 +146,24 @@ export function subscribeExpenses(groupId, hexMembers, onExpense, onEose) {
 
 // ─── Settlements ──────────────────────────────────────────────────────────────
 
-export function subscribeSettlements(groupId, hexMembers, onSettlement, onEose) {
+export function subscribeSettlements(groupId, hexMembers, onSettlement, onEose, ownerPubkey = null) {
   return pool.subscribe({
     id:      'settlements_' + groupId,
     filters: [{ kinds: [9001], authors: hexMembers, '#g': [groupId], limit: 200 }],
     onEvent: (event) => {
-      const settlement = parseSettlementEvent(event, { id: groupId, members: hexMembers })
+      const settlement = parseSettlementEvent(event, { id: groupId, pubkey: ownerPubkey, members: hexMembers })
       if (settlement) onSettlement(settlement)
     },
     onEose,
   })
 }
 // ─── Recipient-signed payment confirmations ─────────────────────────────────
-export function subscribeConfirmations(groupId, hexMembers, onConfirmation, onEose) {
+export function subscribeConfirmations(groupId, hexMembers, onConfirmation, onEose, ownerPubkey = null) {
   return pool.subscribe({
     id:      'confirmations_' + groupId,
     filters: [{ kinds: [9002], authors: hexMembers, '#g': [groupId], limit: 200 }],
     onEvent: event => {
-      const confirmation = parseConfirmationEvent(event, { id: groupId, members: hexMembers })
+      const confirmation = parseConfirmationEvent(event, { id: groupId, pubkey: ownerPubkey, members: hexMembers })
       if (confirmation) onConfirmation(confirmation)
     },
     onEose,
