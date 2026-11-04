@@ -55,6 +55,9 @@ test('two signed clients: group, expense, debtor claim, recipient approval, refr
     await expect(b.page.getByText('E2E viaggio', { exact: true })).toBeVisible()
 
     await a.page.getByText('E2E viaggio', { exact: true }).click()
+    // Regression: creator's signed genesis must be usable without waiting
+    // for the relay to echo the exact group definition back to the creator.
+    await expect(a.page.getByRole('button', { name: '+ ADD' })).toBeEnabled()
     await a.page.getByRole('button', { name: '+ ADD' }).click()
     await a.page.getByPlaceholder('es. Cena al ristorante').fill('Cena di prova')
     await a.page.getByPlaceholder('21000').fill('600')
@@ -96,12 +99,16 @@ test('two signed clients: group, expense, debtor claim, recipient approval, refr
     expect([...relay.events.values()].filter(e => e.kind === 9000)).toHaveLength(1)
     expect([...relay.events.values()].filter(e => e.kind === 9001)).toHaveLength(1)
     expect([...relay.events.values()].filter(e => e.kind === 9002)).toHaveLength(1)
+    expect([...relay.events.values()].filter(e => e.kind === 9591)).toHaveLength(1)
     const createdGroup = [...relay.events.values()].find(e => e.kind === 30001)
+    const genesis = [...relay.events.values()].find(e => e.kind === 9591)
+    expect(JSON.parse(createdGroup.content).revisionEventId).toBe(genesis.id)
     const dTag = createdGroup.tags.find(t => t[0] === 'd')[1]
     const address = `30001:${createdGroup.pubkey}:${dTag}`
     for (const kind of [9000, 9001, 9002]) {
       const signed = [...relay.events.values()].find(e => e.kind === kind)
       expect(signed.tags).toContainEqual(['a', address])
+      expect(signed.tags).toContainEqual(['r', genesis.id])
     }
   } finally {
     await Promise.allSettled([a.context.close(), b.context.close()])

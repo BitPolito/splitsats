@@ -30,6 +30,8 @@ export default function GroupsView({ groups, myPubkey, profiles, onSelectGroup, 
         const iOwe     = debts.filter(d => d.from === myPubkey).reduce((s, d) => s + d.amount, 0)
         const owedToMe = debts.filter(d => d.to   === myPubkey).reduce((s, d) => s + d.amount, 0)
         const net      = owedToMe - iOwe
+        const awaitingHistory = !!(g._revisionId &&
+          (g._revisionStatus !== 'verified' || g._financialReviewRequired))
 
         return (
           <div
@@ -62,7 +64,7 @@ export default function GroupsView({ groups, myPubkey, profiles, onSelectGroup, 
                 border: `2px solid ${net === 0 ? 'var(--text3)' : net > 0 ? 'var(--green)' : 'var(--red)'}`,
                 padding: '4px 8px',
               }}>
-                {net === 0 ? 'PARI' : net > 0 ? `+${sats(net)}` : sats(net)}
+                {awaitingHistory ? 'STORICO DA VERIFICARE' : net === 0 ? 'PARI' : net > 0 ? `+${sats(net)}` : sats(net)}
               </div>
             </div>
 

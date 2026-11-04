@@ -194,6 +194,13 @@ export default function App() {
         <SettleModal
           debt={settleDebt} profiles={profiles} groupId={liveGroup?.id} myPubkey={pubkey}
           onSettled={async (_legacyGroupId, data) => await recordSettlement(groupAddress(liveGroup), data)}
+          ensureGroupCurrent={() => {
+            const g = useStore.getState().getGroup(groupAddress(liveGroup))
+            if (!g || (g._revisionId &&
+                (g._revisionStatus !== 'verified' || g._financialReviewRequired))) {
+              throw new Error('Registro gruppo non verificato: nessun pagamento deve partire')
+            }
+          }}
           onClose={() => { setModal(null); setSettleDebt(null) }}
         />
       )}

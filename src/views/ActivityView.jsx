@@ -4,7 +4,10 @@ const CATS = { food:'🍕', transport:'🚌', accommodation:'🏠', entertainmen
 const sats = (n) => Number(n).toLocaleString() + ' sat'
 
 export default function ActivityView({ groups, myPubkey, profiles }) {
+  const withheld = groups.filter(g => g._revisionId &&
+    (g._revisionStatus !== 'verified' || g._financialReviewRequired))
   const all = groups
+    .filter(g => !withheld.includes(g))
     .flatMap(g => (g.expenses || []).map(e => ({ ...e, groupName: g.name })))
     .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
 
@@ -14,6 +17,11 @@ export default function ActivityView({ groups, myPubkey, profiles }) {
         // attività recente
       </div>
 
+      {withheld.length > 0 && (
+        <div role="status" style={{ color: 'var(--red)', fontFamily: 'var(--mono)', fontSize: 11 }}>
+          Alcuni gruppi hanno uno storico non verificato: le relative attività sono temporaneamente nascoste.
+        </div>
+      )}
       {all.length === 0 && (
         <Empty icon="◻">
           NESSUNA ATTIVITÀ.<br />

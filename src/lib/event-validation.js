@@ -59,10 +59,16 @@ export function parseGroupEvent(event, viewerPubkey, normalizeMember = value => 
       !exactMemberTags(event, members)) return null
   // Reject an event whose content claims a different group from its signed d-tag.
   if (data.id !== undefined && data.id !== d[0]) return null
+  // A signed pointer to the immutable revision log is authoritative.
+  const r = taggedValues(event, 'r')
+  if (!r || r.length > 1 || (data.revisionEventId === undefined
+    ? r.length !== 0
+    : !HEX_EVENT.test(data.revisionEventId) || r.length !== 1 || r[0] !== data.revisionEventId)) return null
   return {
     id: d[0], name: data.name.trim(), members,
     createdAt: Number.isSafeInteger(data.createdAt) ? data.createdAt : event.created_at,
     pubkey: event.pubkey, eventId: event.id, _groupCreatedAt: event.created_at,
+    _revisionId: data.revisionEventId || null,
   }
 }
 
