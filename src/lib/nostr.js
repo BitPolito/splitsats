@@ -6,6 +6,10 @@ import { outbox, replayStoredEvents } from './outbox'
 import { parseGroupEvent, parseExpenseEvent, parseSettlementEvent, parseConfirmationEvent } from './event-validation'
 import { groupAddress } from './group-history'
 import { KIND_GROUP_REVISION, parseGroupRevisionEvent } from './group-revision-log'
+import { KIND_GROUP_INVITATION } from './constants'
+import { parseInvitationDecisionEvent } from './group-invitations'
+import { KIND_EXPENSE_DECISION } from './constants'
+import { parseExpenseDecisionEvent } from './expense-approvals'
 
 // ─── npub ↔ hex conversion ────────────────────────────────────────────────────
 // Nostr relays always use hex pubkeys. npub is only a display format.
@@ -149,17 +153,51 @@ export function subscribeGroupRevisions(group, onRevision, onEose) {
   })
 }
 
+// Signed membership decisions are read only after the immutable group
+// revision history is verified. Nostr signatures are validated by RelayPool.
+export function subscribeGroupInvitations(group, onDecision, onEose) {
+  const address = groupAddress(group)
+  if (!address || !group._revisionId) throw new Error('Gruppo non verificato')
+  return pool.subscribe({
+    id: 'group_invitations_' + address,
+    filters: [{ kinds: [KIND_GROUP_INVITATION], authors: group.members.filter(pk => pk !== group.pubkey),
+      '#a': [address], '#r': [group._revisionId], limit: 200 }],
+    onEvent: event => {
+      const decision = parseInvitationDecisionEvent(event, group)
+      if (decision) onDecision(decision)
+    },
+    onEose,
+  })
+}
+
+// Immutable signed decisions for a specific expense in an accepted group.
+export function subscribeExpenseDecisions(group, onDecision, onEose) {
+  const address = groupAddress(group)
+  if (!address || !group._revisionId) throw new Error('Revisione del gruppo non valida')
+  return pool.subscribe({
+    id: 'expense_decisions_' + address,
+    filters: [{ kinds: [KIND_EXPENSE_DECISION], authors: group.members,
+      '#a': [address], '#g': [group.id], '#r': [group._revisionId], limit: 500 }],
+    onEvent: event => {
+      const decision = parseExpenseDecisionEvent(event, group)
+      if (decision) onDecision(decision)
+    },
+    onEose,
+  })
+}
+
 // ─── Expenses ─────────────────────────────────────────────────────────────────
 
-export function subscribeExpenses(groupId, hexMembers, onExpense, onEose, ownerPubkey = null, resolveEventMembers = null) {
+export function subscribeExpenses(groupId, hexMembers, onExpense, onEose, ownerPubkey = null, resolveEventMembers = null, canUseEvent = null) {
   return pool.subscribe({
     id:      'expenses_' + (ownerPubkey ? `${ownerPubkey}:${groupId}` : groupId),
     filters: [{ kinds: [9000], authors: hexMembers, '#g': [groupId], limit: 500 }],
     onEvent: (event) => {
+      if (canUseEvent && !canUseEvent(event)) return
       const actualMembers = resolveEventMembers ? resolveEventMembers(event) : hexMembers
       if (!actualMembers) return
       const expense = parseExpenseEvent(event, { id: groupId, pubkey: ownerPubkey, members: actualMembers })
-      if (expense) onExpense({ ...expense, _membersAtRevision: actualMembers,
+      if (expense) onExpense({ ...expense, _signedAt: event.created_at, _membersAtRevision: actualMembers,
         _legacyUnscoped: !event.tags.some(tag => tag[0] === 'a') })
     },
     onEose,
@@ -168,11 +206,12 @@ export function subscribeExpenses(groupId, hexMembers, onExpense, onEose, ownerP
 
 // ─── Settlements ──────────────────────────────────────────────────────────────
 
-export function subscribeSettlements(groupId, hexMembers, onSettlement, onEose, ownerPubkey = null, resolveEventMembers = null) {
+export function subscribeSettlements(groupId, hexMembers, onSettlement, onEose, ownerPubkey = null, resolveEventMembers = null, canUseEvent = null) {
   return pool.subscribe({
     id:      'settlements_' + (ownerPubkey ? `${ownerPubkey}:${groupId}` : groupId),
     filters: [{ kinds: [9001], authors: hexMembers, '#g': [groupId], limit: 200 }],
     onEvent: (event) => {
+      if (canUseEvent && !canUseEvent(event)) return
       const actualMembers = resolveEventMembers ? resolveEventMembers(event) : hexMembers
       if (!actualMembers) return
       const settlement = parseSettlementEvent(event, { id: groupId, pubkey: ownerPubkey, members: actualMembers })
@@ -183,11 +222,12 @@ export function subscribeSettlements(groupId, hexMembers, onSettlement, onEose, 
   })
 }
 // ─── Recipient-signed payment confirmations ─────────────────────────────────
-export function subscribeConfirmations(groupId, hexMembers, onConfirmation, onEose, ownerPubkey = null, resolveEventMembers = null) {
+export function subscribeConfirmations(groupId, hexMembers, onConfirmation, onEose, ownerPubkey = null, resolveEventMembers = null, canUseEvent = null) {
   return pool.subscribe({
     id:      'confirmations_' + (ownerPubkey ? `${ownerPubkey}:${groupId}` : groupId),
     filters: [{ kinds: [9002], authors: hexMembers, '#g': [groupId], limit: 200 }],
     onEvent: event => {
+      if (canUseEvent && !canUseEvent(event)) return
       const actualMembers = resolveEventMembers ? resolveEventMembers(event) : hexMembers
       if (!actualMembers) return
       const confirmation = parseConfirmationEvent(event, { id: groupId, pubkey: ownerPubkey, members: actualMembers })

@@ -1,14 +1,16 @@
 import { create } from 'zustand'
 import { saveGroups, loadProfiles, saveProfiles, loadPubkey, savePubkey, clearAll, clearPubkey } from '../lib/storage'
 import { verifyCachedSigner } from '../lib/session-identity'
-import { publishEvent, fetchProfile, fetchGroups, subscribeGroupRevisions, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
-import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION, KIND_GROUP_REVISION } from '../lib/constants'
+import { publishEvent, fetchProfile, fetchGroups, subscribeGroupRevisions, subscribeGroupInvitations, subscribeExpenseDecisions, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
+import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION, KIND_GROUP_REVISION, KIND_GROUP_INVITATION, KIND_EXPENSE_DECISION } from '../lib/constants'
 import { validPubkey } from '../lib/event-validation'
 import { groupAddress } from '../lib/group-history'
 import { parseGroupRevisionEvent, revisionTags, verifyGroupRevisionHistory, membersForRevisionEvent } from '../lib/group-revision-log'
 import { findGroupByRef, mergeVerifiedGroup, mayApplyGroupTransaction } from '../lib/group-state'
 import { releaseConfirmedPaymentAttempt } from '../lib/payment-attempts'
 import { isConfirmedSettlement } from '../lib/settlement-status'
+import { CONSENT_POLICY, invitationTags, parseInvitationDecisionEvent, invitationSummary, invitationReceiptTags, hasInvitationReceipts } from '../lib/group-invitations'
+import { EXPENSE_POLICY, expenseDecisionTags, parseExpenseDecisionEvent, expenseApprovalSummary, reconcileExpenseApprovals } from '../lib/expense-approvals'
 
 const randId = () => crypto.randomUUID()
 const now    = () => Math.floor(Date.now() / 1000)
@@ -113,6 +115,10 @@ export const useStore = create((set, get) => ({
             delete activeSubs[type + ref]
           }
           delete subscribedMemberKeys[ref]
+          activeSubs['inv_' + ref]?.()
+          delete activeSubs['inv_' + ref]
+          activeSubs['approval_' + ref]?.()
+          delete activeSubs['approval_' + ref]
           activeSubs['rev_' + ref]?.()
           const head = live._revisionId
           const received = new Map()
@@ -131,13 +137,20 @@ export const useStore = create((set, get) => ({
                   const groups = s.groups.map(g => groupAddress(g) === ref
                     ? { ...g, _revisions: result.chain, _revisionStatus: 'verified',
                       _financialReviewRequired: result.removedMembers.length > 0,
+                      _consentPolicy: result.consentPolicy, _inviteDecisions: [],
+                      _inviteStatus: result.consentPolicy ? 'pending' : 'legacy',
+                      _expensePolicy: result.expensePolicy, proposedExpenses: [],
+                      _expenseDecisions: [], _expenseReviewRequired: false,
                       expenses: [], settlements: [], confirmations: [] }
                     : g)
                   saveGroups(pubkey, groups)
                   return { groups }
                 })
               }
-              if (!result.removedMembers.length) get().subscribeGroup(ref, result.allMembers)
+              if (!result.removedMembers.length) {
+                if (result.consentPolicy === CONSENT_POLICY) get().watchGroupInvitations(ref)
+                else get().subscribeGroup(ref, result.allMembers)
+              }
             } else {
               for (const type of ['exp_', 'set_', 'conf_']) {
                 activeSubs[type + ref]?.()
@@ -179,13 +192,82 @@ export const useStore = create((set, get) => ({
     )
   },
 
+  // ─── SIGNED INVITATIONS ─────────────────────────────────────────────────────
+
+  watchGroupInvitations: (ref) => {
+    const group = get().getGroup(ref)
+    const account = get().pubkey
+    if (!group || !account || !group.members.includes(account) ||
+        group._revisionStatus !== 'verified' || group._financialReviewRequired ||
+        group._consentPolicy !== CONSENT_POLICY) return
+    // Never open multiple subscriptions to the same revision.
+    if (activeSubs['inv_' + ref]) return
+    const revisionId = group._revisionId
+    activeSubs['inv_' + ref] = subscribeGroupInvitations(group, decision => {
+      if (get().pubkey !== account || currentSessionPubkey !== account ||
+          get().getGroup(ref)?._revisionId !== revisionId) return
+      get().applyInvitationDecision(ref, decision)
+    }, () => {})
+  },
+
+  applyInvitationDecision: (ref, decision) => {
+    const group = get().getGroup(ref)
+    if (!group || group._consentPolicy !== CONSENT_POLICY ||
+        group._revisionStatus !== 'verified' || decision.revisionEventId !== group._revisionId) return
+    if (!group.members.includes(decision.member) || decision.member === group.pubkey) return
+    const current = group._inviteDecisions || []
+    if (current.some(row => row.id === decision.id)) return
+    const decisions = [...current, decision]
+    const result = invitationSummary(group, decisions)
+    set(s => {
+      const groups = s.groups.map(g => groupAddress(g) === ref
+        ? { ...g, _inviteDecisions: decisions, _inviteStatus: result.status,
+            ...(result.status === 'accepted' ? {} :
+              { expenses: [], settlements: [], confirmations: [] }) }
+        : g)
+      saveGroups(get().pubkey, groups)
+      return { groups }
+    })
+    if (result.status === 'accepted') {
+      get().subscribeGroup(ref, group._revisions?.flatMap(r => r.members) || group.members)
+    } else {
+      for (const kind of ['exp_', 'set_', 'conf_']) {
+        activeSubs[kind + ref]?.()
+        delete activeSubs[kind + ref]
+      }
+      delete subscribedMemberKeys[ref]
+    }
+  },
+
+  decideInvitation: async (ref, decision) => {
+    const group = get().getGroup(ref)
+    const account = get().pubkey
+    if (!group || group._consentPolicy !== CONSENT_POLICY ||
+        group._revisionStatus !== 'verified' || group._financialReviewRequired ||
+        !group.members.includes(account) || account === group.pubkey ||
+        !['accept', 'decline'].includes(decision) ||
+        (group._inviteDecisions || []).some(row => row.member === account)) {
+      throw new Error('Questo invito non e disponibile o e gia stato deciso')
+    }
+    const signed = await publishEvent(account, KIND_GROUP_INVITATION,
+      { groupId: group.id, revisionEventId: group._revisionId, decision },
+      invitationTags(group))
+    if (get().pubkey !== account || get().getGroup(ref)?._revisionId !== group._revisionId) return
+    const parsed = parseInvitationDecisionEvent(signed, group)
+    if (!parsed) throw new Error('Decisione Nostr firmata non valida')
+    get().applyInvitationDecision(ref, parsed)
+  },
+
   // ─── REAL-TIME SUBSCRIPTIONS ───────────────────────────────────────────────
 
   subscribeGroup: (ref, members) => {
     const group = get().getGroup(ref)
     const subscriptionOwner = get().pubkey
     if (!group || !group.members.includes(subscriptionOwner) ||
-        (group._revisionId && (group._revisionStatus !== 'verified' || group._financialReviewRequired))) return
+        (group._revisionId && (group._revisionStatus !== 'verified' || group._financialReviewRequired)) ||
+        group._expenseReviewRequired ||
+        (group._consentPolicy === CONSENT_POLICY &&
+          invitationSummary(group, group._inviteDecisions || []).status !== 'accepted')) return
     const groupId = group.id
     const groupOwner = group.pubkey
     const memberKey = `${groupOwner}:${group._revisionId || 'legacy'}:${[...new Set(members)].sort().join(',')}`
@@ -195,10 +277,14 @@ export const useStore = create((set, get) => ({
     const isCurrent = () => get().pubkey === subscriptionOwner &&
       currentSessionPubkey === subscriptionOwner && subscribedMemberKeys[ref] === memberKey &&
       (!group._revisionId || (get().getGroup(ref)?._revisionStatus === 'verified' &&
-        !get().getGroup(ref)?._financialReviewRequired))
+        !get().getGroup(ref)?._financialReviewRequired)) &&
+      (get().getGroup(ref)?._consentPolicy !== CONSENT_POLICY ||
+        invitationSummary(get().getGroup(ref), get().getGroup(ref)?._inviteDecisions || []).status === 'accepted') &&
+      !get().getGroup(ref)?._expenseReviewRequired
     const resolveEventMembers = group._revisionId
       ? event => membersForRevisionEvent(get().getGroup(ref)?._revisions, event)
       : null
+    const canUseEvent = event => hasInvitationReceipts(get().getGroup(ref), event)
 
     const unsubExp = subscribeExpenses(
       groupId, members,
@@ -211,15 +297,18 @@ export const useStore = create((set, get) => ({
             const authorizedMembers = expense._membersAtRevision || g.members
             if (!authorizedMembers.includes(expense._pubkey) || !authorizedMembers.includes(expense.paidBy) ||
                 !expense.splits.every(m => authorizedMembers.includes(m))) return g
-            if (g.expenses.some(e => e._eventId === expense._eventId ||
+            const pool = g._expensePolicy === EXPENSE_POLICY ? (g.proposedExpenses || []) : g.expenses
+            if (pool.some(e => e._eventId === expense._eventId ||
               (e.id === expense.id && e._pubkey === expense._pubkey))) return g
-            return { ...g, expenses: [...g.expenses, expense] }
+            return g._expensePolicy === EXPENSE_POLICY
+              ? reconcileExpenseApprovals({ ...g, proposedExpenses: [...pool, expense] })
+              : { ...g, expenses: [...g.expenses, expense] }
           })
           saveGroups(subscriptionOwner, groups)
           return { groups }
         })
       },
-      () => {}, groupOwner, resolveEventMembers
+      () => {}, groupOwner, resolveEventMembers, canUseEvent
     )
 
     const unsubSet = subscribeSettlements(
@@ -242,7 +331,7 @@ export const useStore = create((set, get) => ({
           return { groups }
         })
       },
-      () => {}, groupOwner, resolveEventMembers
+      () => {}, groupOwner, resolveEventMembers, canUseEvent
     )
 
     const unsubConf = subscribeConfirmations(
@@ -278,12 +367,28 @@ export const useStore = create((set, get) => ({
           } catch { /* Keep fail-closed on storage errors. */ }
         }
       },
-      () => {}, groupOwner, resolveEventMembers
+      () => {}, groupOwner, resolveEventMembers, canUseEvent
     )
 
     activeSubs['conf_' + ref] = unsubConf
     activeSubs['exp_' + ref] = unsubExp
     activeSubs['set_' + ref] = unsubSet
+    if (group._expensePolicy === EXPENSE_POLICY) {
+      activeSubs['approval_' + ref]?.()
+      activeSubs['approval_' + ref] = subscribeExpenseDecisions(group, decision => {
+        if (!isCurrent()) return
+        set(s => {
+          const groups = s.groups.map(g => {
+            if (groupAddress(g) !== ref || g._revisionId !== decision.revisionEventId ||
+                (g._expenseDecisions || []).some(d => d.id === decision.id)) return g
+            return reconcileExpenseApprovals({ ...g,
+              _expenseDecisions: [...(g._expenseDecisions || []), decision] })
+          })
+          saveGroups(subscriptionOwner, groups)
+          return { groups }
+        })
+      }, () => {})
+    }
   },
 
   // ─── PROFILES ──────────────────────────────────────────────────────────────
@@ -318,7 +423,8 @@ export const useStore = create((set, get) => ({
     // Publish immutable genesis BEFORE the replaceable group definition.
     // Partial delivery is recoverable via the signed outbox, not a new event.
     const signedRevision = await publishEvent(pubkey, KIND_GROUP_REVISION,
-      { groupId, version: 0, previousRevisionId: null, members },
+      { groupId, version: 0, previousRevisionId: null, members,
+        consentPolicy: CONSENT_POLICY, expensePolicy: EXPENSE_POLICY },
       revisionTags(baseGroup, members))
     const groupData = { id: groupId, name, members, createdAt: now(),
       revisionEventId: signedRevision.id }
@@ -336,6 +442,9 @@ export const useStore = create((set, get) => ({
     const newGroup = { ...groupData, pubkey, eventId: signed.id,
       _revisionId: signedRevision.id, _revisions: [ownRevision],
       _revisionStatus: 'verified', _financialReviewRequired: false,
+      _consentPolicy: CONSENT_POLICY, _inviteDecisions: [], _inviteStatus: 'pending',
+      _expensePolicy: EXPENSE_POLICY, proposedExpenses: [], _expenseDecisions: [],
+      _expenseReviewRequired: false,
       _groupCreatedAt: signed.created_at, expenses: [], settlements: [], confirmations: [], _synced: true }
     set(s => {
       const merged = mergeVerifiedGroup(s.groups, newGroup)
@@ -348,7 +457,10 @@ export const useStore = create((set, get) => ({
         groupAddress(g) === ref && g.eventId === signed.id &&
         g._revisionId === signedRevision.id
           ? { ...g, _revisions: [ownRevision], _revisionStatus: 'verified',
-              _financialReviewRequired: false }
+              _financialReviewRequired: false, _consentPolicy: CONSENT_POLICY,
+              _inviteDecisions: [], _inviteStatus: 'pending',
+              _expensePolicy: EXPENSE_POLICY, proposedExpenses: [],
+              _expenseDecisions: [], _expenseReviewRequired: false }
           : g)
       saveGroups(pubkey, updated)
       return { groups: updated, toast: `Gruppo "${name}" creato` }
@@ -357,7 +469,7 @@ export const useStore = create((set, get) => ({
     // The creator can now subscribe immediately, even if the relay has not
     // echoed the group definition yet. Other accounts must still independently
     // reconstruct the signed immutable revision chain from relays.
-    get().subscribeGroup(groupAddress(newGroup), members)
+    get().watchGroupInvitations(groupAddress(newGroup))
     members.forEach(m => get().fetchAndCacheProfile(m))
     return groupId
   },
@@ -368,6 +480,10 @@ export const useStore = create((set, get) => ({
     const { pubkey } = get()
     const group      = get().getGroup(groupRef)
     if (!group || !group.members.includes(pubkey)) throw new Error('Non sei membro di questo gruppo')
+    if (group._consentPolicy === CONSENT_POLICY &&
+        invitationSummary(group, group._inviteDecisions || []).status !== 'accepted')
+      throw new Error('Inviti non accettati: nessuna spesa puo essere registrata')
+    if (group._expenseReviewRequired) throw new Error('Spese contestate: operazioni bloccate')
     if (group._revisionId && (group._revisionStatus !== 'verified' || group._financialReviewRequired))
       throw new Error('Storico del gruppo incompleto o da riconciliare: operazione bloccata')
     if (!Number.isSafeInteger(expense.amount) || expense.amount <= 0 ||
@@ -384,22 +500,58 @@ export const useStore = create((set, get) => ({
     const signed = await publishEvent(pubkey, KIND_EXPENSE, expenseData, [
       ['g', group.id], ['a', groupAddress(group)],
       ...(group._revisionId ? [['r', group._revisionId]] : []),
+      ...(group._consentPolicy === CONSENT_POLICY ? invitationReceiptTags(group) : []),
       ['t', 'splitsats'],
       ...group.members.map(m => ['p', m]),
     ])
 
     if (get().pubkey !== pubkey) return // keep event associated with its signing account
 
-    const localExpense = { ...expenseData, _eventId: signed.id, _pubkey: pubkey }
+    const localExpense = { ...expenseData, _eventId: signed.id, _pubkey: pubkey, _signedAt: signed.created_at }
     set(s => {
       const groups = s.groups.map(g => {
         if (groupAddress(g) !== groupRef) return g
-        if (g.expenses.some(e => e._eventId === signed.id ||
+        const pool = g._expensePolicy === EXPENSE_POLICY ? (g.proposedExpenses || []) : g.expenses
+        if (pool.some(e => e._eventId === signed.id ||
           (e.id === expenseData.id && e._pubkey === pubkey))) return g
-        return { ...g, expenses: [...g.expenses, localExpense] }
+        return g._expensePolicy === EXPENSE_POLICY
+          ? reconcileExpenseApprovals({ ...g, proposedExpenses: [...pool, localExpense] })
+          : { ...g, expenses: [...g.expenses, localExpense] }
       })
       saveGroups(get().pubkey, groups)
       return { groups, toast: `"${expense.description}" — ${expense.amount.toLocaleString()} sats` }
+    })
+  },
+
+  // ─── EXPENSE APPROVAL / DISPUTE ────────────────────────────────────────────
+
+  decideExpense: async (ref, expenseEventId, decision) => {
+    const account = get().pubkey
+    const group = get().getGroup(ref)
+    const expense = group?.proposedExpenses?.find(e => e._eventId === expenseEventId)
+    if (!group || !expense || group._expensePolicy !== EXPENSE_POLICY ||
+        group._revisionStatus !== 'verified' || group._financialReviewRequired ||
+        group._expenseReviewRequired || !['approve', 'dispute'].includes(decision)) {
+      throw new Error('Spesa non disponibile per approvazione o contestazione')
+    }
+    const result = expenseApprovalSummary(group, expense, group._expenseDecisions || [])
+    if (!result.required?.includes(account) || !result.pending.includes(account) ||
+        result.status !== 'pending') throw new Error('Hai gia deciso o non sei coinvolto nella spesa')
+    const signed = await publishEvent(account, KIND_EXPENSE_DECISION,
+      { groupId: group.id, revisionEventId: group._revisionId,
+        expenseEventId: expense._eventId, expenseAuthor: expense._pubkey, decision },
+      expenseDecisionTags(group, expense))
+    if (get().pubkey !== account || get().getGroup(ref)?._revisionId !== group._revisionId) return
+    const parsed = parseExpenseDecisionEvent(signed, group)
+    if (!parsed) throw new Error('Decisione firmata non valida: controlla la outbox')
+    set(s => {
+      const groups = s.groups.map(g => {
+        if (groupAddress(g) !== ref || (g._expenseDecisions || []).some(d => d.id === parsed.id)) return g
+        return reconcileExpenseApprovals({ ...g,
+          _expenseDecisions: [...(g._expenseDecisions || []), parsed] })
+      })
+      saveGroups(account, groups)
+      return { groups }
     })
   },
 
@@ -410,6 +562,10 @@ export const useStore = create((set, get) => ({
     const group = get().getGroup(groupRef)
     if (group?._revisionId && (group._revisionStatus !== 'verified' || group._financialReviewRequired))
       throw new Error('Storico del gruppo incompleto o da riconciliare: pagamento bloccato')
+    if (group?._consentPolicy === CONSENT_POLICY &&
+        invitationSummary(group, group._inviteDecisions || []).status !== 'accepted')
+      throw new Error('Inviti non accettati: pagamento bloccato')
+    if (group?._expenseReviewRequired) throw new Error('Spesa contestata: pagamento bloccato')
     if (!group || !group.members.includes(from) || !group.members.includes(to) ||
         from !== pubkey || from === to || !Number.isSafeInteger(amount) || amount <= 0 ||
         !['manual', 'webln'].includes(method) ||
@@ -427,6 +583,7 @@ export const useStore = create((set, get) => ({
     const signed = await publishEvent(pubkey, KIND_SETTLEMENT, data, [
       ['g', group.id], ['a', groupAddress(group)],
       ...(group._revisionId ? [['r', group._revisionId]] : []),
+      ...(group._consentPolicy === CONSENT_POLICY ? invitationReceiptTags(group) : []),
       ['p', to], ['t', 'splitsats'],
     ])
 
@@ -454,6 +611,10 @@ export const useStore = create((set, get) => ({
     const group = get().getGroup(groupRef)
     if (group?._revisionId && (group._revisionStatus !== 'verified' || group._financialReviewRequired))
       throw new Error('Storico del gruppo incompleto o da riconciliare: conferma bloccata')
+    if (group?._consentPolicy === CONSENT_POLICY &&
+        invitationSummary(group, group._inviteDecisions || []).status !== 'accepted')
+      throw new Error('Inviti non accettati: conferma bloccata')
+    if (group?._expenseReviewRequired) throw new Error('Spesa contestata: conferma bloccata')
     const settlement = group?.settlements?.find(s => s._eventId === settlementId)
     if (!group || !settlement || settlement.to !== pubkey ||
         !group.members.includes(settlement.from) || !group.members.includes(pubkey)) {
@@ -471,6 +632,7 @@ export const useStore = create((set, get) => ({
     const signed = await publishEvent(pubkey, KIND_CONFIRMATION, data, [
       ['g', group.id], ['a', groupAddress(group)],
       ...(group._revisionId ? [['r', group._revisionId]] : []),
+      ...(group._consentPolicy === CONSENT_POLICY ? invitationReceiptTags(group) : []),
       ['e', settlement._eventId], ['p', settlement.from], ['t', 'splitsats'],
     ])
     if (get().pubkey !== pubkey) return

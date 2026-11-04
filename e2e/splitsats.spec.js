@@ -55,6 +55,10 @@ test('two signed clients: group, expense, debtor claim, recipient approval, refr
     await expect(b.page.getByText('E2E viaggio', { exact: true })).toBeVisible()
 
     await a.page.getByText('E2E viaggio', { exact: true }).click()
+    await expect(a.page.getByRole('button', { name: '+ ADD' })).toBeDisabled()
+    await b.page.getByText('E2E viaggio', { exact: true }).click()
+    await expect(b.page.getByRole('button', { name: 'ACCETTA INVITO' })).toBeVisible()
+    await b.page.getByRole('button', { name: 'ACCETTA INVITO' }).click()
     // Regression: creator's signed genesis must be usable without waiting
     // for the relay to echo the exact group definition back to the creator.
     await expect(a.page.getByRole('button', { name: '+ ADD' })).toBeEnabled()
@@ -63,9 +67,11 @@ test('two signed clients: group, expense, debtor claim, recipient approval, refr
     await a.page.getByPlaceholder('21000').fill('600')
     await a.page.getByRole('button', { name: '⚡ ADD EXPENSE' }).click()
     await expect(a.page.getByText('Cena di prova', { exact: true })).toBeVisible()
+    await expect(a.page.getByRole('button', { name: 'SALDI' })).toBeVisible()
 
-    await b.page.getByText('E2E viaggio', { exact: true }).click()
     await expect(b.page.getByText('Cena di prova', { exact: true })).toBeVisible()
+    await expect(b.page.getByRole('button', { name: 'APPROVA SPESA' })).toBeVisible()
+    await b.page.getByRole('button', { name: 'APPROVA SPESA' }).click()
     await b.page.getByRole('button', { name: 'SALDI' }).click()
     await expect(b.page.getByText('DEVI').locator('..')).toContainText('300 sat')
     await b.page.getByRole('button', { name: 'PAY ⚡' }).click()
@@ -100,8 +106,14 @@ test('two signed clients: group, expense, debtor claim, recipient approval, refr
     expect([...relay.events.values()].filter(e => e.kind === 9001)).toHaveLength(1)
     expect([...relay.events.values()].filter(e => e.kind === 9002)).toHaveLength(1)
     expect([...relay.events.values()].filter(e => e.kind === 9591)).toHaveLength(1)
+    expect([...relay.events.values()].filter(e => e.kind === 9592)).toHaveLength(1)
+    expect([...relay.events.values()].filter(e => e.kind === 9593)).toHaveLength(1)
     const createdGroup = [...relay.events.values()].find(e => e.kind === 30001)
     const genesis = [...relay.events.values()].find(e => e.kind === 9591)
+    const acceptance = [...relay.events.values()].find(e => e.kind === 9592)
+    const expenseDecision = [...relay.events.values()].find(e => e.kind === 9593)
+    expect(JSON.parse(expenseDecision.content).decision).toBe('approve')
+    expect(JSON.parse(acceptance.content).decision).toBe('accept')
     expect(JSON.parse(createdGroup.content).revisionEventId).toBe(genesis.id)
     const dTag = createdGroup.tags.find(t => t[0] === 'd')[1]
     const address = `30001:${createdGroup.pubkey}:${dTag}`
@@ -109,12 +121,62 @@ test('two signed clients: group, expense, debtor claim, recipient approval, refr
       const signed = [...relay.events.values()].find(e => e.kind === kind)
       expect(signed.tags).toContainEqual(['a', address])
       expect(signed.tags).toContainEqual(['r', genesis.id])
+      expect(signed.tags).toContainEqual(['i', acceptance.id])
     }
   } finally {
     await Promise.allSettled([a.context.close(), b.context.close()])
   }
 })
 
+
+test('a signed expense objection never creates a payable balance', async ({ browser }) => {
+  const relay = new MemoryNostrRelay()
+  const a = await openSignedClient(browser, relay, testSigner(51))
+  const b = await openSignedClient(browser, relay, testSigner(52))
+  try {
+    await login(a.page); await login(b.page)
+    await createGroup(a.page, 'Spesa contestabile', b.pubkey)
+    await b.page.getByText('Spesa contestabile', { exact: true }).click()
+    await b.page.getByRole('button', { name: 'ACCETTA INVITO' }).click()
+    await a.page.getByText('Spesa contestabile', { exact: true }).click()
+    await expect(a.page.getByRole('button', { name: '+ ADD' })).toBeEnabled()
+    await a.page.getByRole('button', { name: '+ ADD' }).click()
+    await a.page.getByPlaceholder('es. Cena al ristorante').fill('Spesa non condivisa')
+    await a.page.getByPlaceholder('21000').fill('400')
+    await a.page.getByRole('button', { name: '⚡ ADD EXPENSE' }).click()
+    await expect(b.page.getByRole('button', { name: 'CONTESTA SPESA' })).toBeVisible()
+    await b.page.getByRole('button', { name: 'CONTESTA SPESA' }).click()
+    await expect(b.page.getByText(/Una spesa e contestata/)).toBeVisible()
+    await b.page.getByRole('button', { name: 'SALDI' }).click()
+    await expect(b.page.getByText('SALDI NON VERIFICATI.')).toBeVisible()
+    expect([...relay.events.values()].filter(e => e.kind === 9001)).toHaveLength(0)
+  } finally {
+    await Promise.allSettled([a.context.close(), b.context.close()])
+  }
+})
+
+test('a signed declined invitation never activates balances or expense controls', async ({ browser }) => {
+  const relay = new MemoryNostrRelay()
+  const a = await openSignedClient(browser, relay, testSigner(41))
+  const b = await openSignedClient(browser, relay, testSigner(42))
+  try {
+    await login(a.page); await login(b.page)
+    await createGroup(a.page, 'Invito rifiutato', b.pubkey)
+    await a.page.getByText('Invito rifiutato', { exact: true }).click()
+    await expect(a.page.getByRole('button', { name: '+ ADD' })).toBeDisabled()
+    await b.page.getByText('Invito rifiutato', { exact: true }).click()
+    await b.page.getByRole('button', { name: 'RIFIUTA INVITO' }).click()
+    await expect(b.page.getByText(/Un invitato ha rifiutato/)).toBeVisible()
+    await expect(a.page.getByText(/Un invitato ha rifiutato/)).toBeVisible()
+    await expect(a.page.getByRole('button', { name: '+ ADD' })).toBeDisabled()
+    expect([...relay.events.values()].filter(e => e.kind === 9000)).toHaveLength(0)
+    await b.page.reload()
+    await b.page.getByText('Invito rifiutato', { exact: true }).click()
+    await expect(b.page.getByText(/Un invitato ha rifiutato/)).toBeVisible()
+  } finally {
+    await Promise.allSettled([a.context.close(), b.context.close()])
+  }
+})
 
 test('same d-tag by two authors cannot merge balances or claim unscoped legacy events', async ({ browser }) => {
   const relay = new MemoryNostrRelay()
