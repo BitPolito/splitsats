@@ -12,6 +12,8 @@ import { KIND_EXPENSE_DECISION } from './constants'
 import { parseExpenseDecisionEvent } from './expense-approvals'
 import { KIND_EXPENSE_CANCELLATION } from './constants'
 import { parseExpenseCancellationEvent } from './expense-cancellations'
+import { KIND_HISTORICAL_ATTESTATION } from './constants'
+import { parseHistoricalAttestationEvent, historicalAttestationParticipants } from './historical-attestations'
 
 // ─── npub ↔ hex conversion ────────────────────────────────────────────────────
 // Nostr relays always use hex pubkeys. npub is only a display format.
@@ -215,11 +217,29 @@ export function subscribePriorRevisionActivity(group, chain, onActivity, onEose)
   if (!address || !old.length || !authors.length) throw new Error('Storico revisioni non valido')
   return pool.subscribe({
     id: 'prior_finance_' + address,
-    filters: [{ kinds: [9000, 9001, 9002, KIND_EXPENSE_DECISION, KIND_EXPENSE_CANCELLATION],
+    filters: [{ kinds: [KIND_GROUP_INVITATION, 9000, 9001, 9002, KIND_EXPENSE_DECISION, KIND_EXPENSE_CANCELLATION],
       authors, '#a': [address], '#g': [group.id],
       '#r': old.map(r => r.id), limit: 500 }],
     onEvent: onActivity,
     onEose,
+  })
+}
+
+// A signed statement is bound to the exact active revision; verifyEvent
+// is enforced by RelayPool before the parser is called. Historical signers
+// may no longer be in the current member list, but their signatures matter.
+export function subscribeHistoricalAttestations(group, onAttestation) {
+  const address = groupAddress(group)
+  const authors = historicalAttestationParticipants(group)
+  if (!address || !authors) throw new Error('Storico revisioni non verificato')
+  return pool.subscribe({
+    id: 'historic_attest_' + address,
+    filters: [{ kinds: [KIND_HISTORICAL_ATTESTATION], authors,
+      '#a': [address], '#g': [group.id], '#r': [group._revisionId], limit: 300 }],
+    onEvent: event => {
+      const row = parseHistoricalAttestationEvent(event, group)
+      if (row) onAttestation(row)
+    },
   })
 }
 

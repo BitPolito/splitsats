@@ -19,5 +19,6 @@ export const KIND_EXPENSE_DECISION = 9593 // Participant-signed expense approval
 export const KIND_EXPENSE_CANCELLATION = 9594 // Participant-signed disputed proposal cancellation
 
 export const KIND_MEMBER_EXIT = 9595 // Voluntary member-signed leave request
+export const KIND_HISTORICAL_ATTESTATION = 9596 // Historical snapshot signature; NEVER a payment authorization
 
 export const APP_TAG = 'splitsats'    // Tag all our events for filtering

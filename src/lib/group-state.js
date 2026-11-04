@@ -50,13 +50,21 @@ export function mergeVerifiedGroup(groups, incoming) {
       _historicalActivityDetected: revisionChanged ? false : !!existing._historicalActivityDetected,
       _priorHistoryChecked: revisionChanged ? false : !!existing._priorHistoryChecked,
       _priorFinancialEvidence: revisionChanged ? [] : existing._priorFinancialEvidence || [],
-      _priorEvidenceOverflow: revisionChanged ? false : !!existing._priorEvidenceOverflow }
+      _priorEvidenceOverflow: revisionChanged ? false : !!existing._priorEvidenceOverflow,
+      _priorReplayEvents: revisionChanged ? [] : existing._priorReplayEvents || [],
+      _priorReplayOverflow: revisionChanged ? false : !!existing._priorReplayOverflow,
+      _historicalSnapshot: revisionChanged ? null : existing._historicalSnapshot || null,
+      _historicalAttestations: revisionChanged ? [] : existing._historicalAttestations || [],
+      _historicalAttestationConflict: revisionChanged ? false : !!existing._historicalAttestationConflict }
     : { ...incoming, expenses: [], settlements: [], confirmations: [], _synced: false,
       _revisions: [], _revisionStatus: incoming._revisionId ? 'pending' : 'legacy',
       _financialReviewRequired: false, proposedExpenses: [],
       _expenseDecisions: [], _cancellationDecisions: [], _expenseReviewRequired: false,
       _priorHistoryChecked: false,
       _priorFinancialEvidence: [], _priorEvidenceOverflow: false,
+      _priorReplayEvents: [], _priorReplayOverflow: false,
+      _historicalSnapshot: null, _historicalAttestations: [],
+      _historicalAttestationConflict: false,
       _memberExitRequests: [], _memberExitStatus: 'none', _historicalActivityDetected: false,
       _financialHistoryChecked: false,
       _expensePolicy: incoming._expensePolicy || null }
