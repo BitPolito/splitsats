@@ -7,6 +7,7 @@ import { hexToNpub, isValidPubkey } from '../lib/nostr'
 import { CONSENT_POLICY, invitationSummary } from '../lib/group-invitations'
 import { EXPENSE_POLICY, expenseApprovalSummary } from '../lib/expense-approvals'
 import { expenseCancellationSummary, cancellationParticipants } from '../lib/expense-cancellations'
+import { priorEvidenceCounts } from '../lib/prior-financial-evidence'
 
 const sats = (n) => Number(n).toLocaleString() + ' sat'
 const CATS = { food:'🍕', transport:'🚌', accommodation:'🏠', entertainment:'🎉', utilities:'⚡', other:'📦' }
@@ -87,6 +88,23 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
           Registro delle revisioni Nostr incompleto, in conflitto o con membri rimossi.
           Saldi e pagamenti bloccati fino alla riconciliazione dello storico.
         </div>
+      )}
+      {group._historicalActivityDetected && (
+        <section role="alert" style={{ padding: '10px 16px', borderBottom: '2px solid var(--red)',
+          fontFamily: 'var(--mono)', fontSize: 10, lineHeight: 1.7 }}>
+          <strong>STORICO FINANZIARIO PRECEDENTE — BLOCCO ATTIVO</strong>
+          {(() => {
+            const rows = group._priorFinancialEvidence || []
+            const c = priorEvidenceCounts(rows)
+            return <div>Eventi identificati: {rows.length} · spese {c.expenses} · dichiarazioni {c.settlements}
+              · conferme {c.confirmations} · decisioni {c.decisions} · annullamenti {c.cancellations}</div>
+          })()}
+          {group._priorEvidenceOverflow && <div>Registro incompleto o oltre limite: revisione manuale obbligatoria.</div>}
+          {(group._priorFinancialEvidence || []).slice(0, 10).map(e =>
+            <div key={e.eventId}>kind:{e.kind} · rev:{e.revisionId.slice(0, 10)} · id:{e.eventId.slice(0, 12)}</div>)}
+          {(group._priorFinancialEvidence || []).length > 10 && <div>Altri eventi nel registro: non mostrati qui.</div>}
+          <div>Questi dati sono prove Nostr, non debiti calcolati. Nessun pagamento automatico.</div>
+        </section>
       )}
       {group._consentPolicy === CONSENT_POLICY && (
         <section role="status" style={{ padding: '12px 16px', borderBottom: '2px solid var(--blue)',

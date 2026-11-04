@@ -13,6 +13,7 @@ import { CONSENT_POLICY, invitationTags, parseInvitationDecisionEvent, invitatio
 import { EXPENSE_POLICY, expenseDecisionTags, parseExpenseDecisionEvent, expenseApprovalSummary, reconcileExpenseApprovals } from '../lib/expense-approvals'
 import { assertCanAddGroupMember } from '../lib/member-additions'
 import { canResumeAfterPriorHistory } from '../lib/prior-history-gate'
+import { priorFinancialEvidence, appendPriorEvidence } from '../lib/prior-financial-evidence'
 import { memberExitTags, parseMemberExitRequestEvent, verifyMemberExitProofs, assertCanRequestExit, assertCanFinalizeExit } from '../lib/member-exits'
 import { expenseCancellationTags, parseExpenseCancellationEvent, expenseCancellationSummary } from '../lib/expense-cancellations'
 
@@ -148,6 +149,7 @@ export const useStore = create((set, get) => ({
                     ? { ...g, _revisions: result.chain, _revisionStatus: 'verified',
                       _financialReviewRequired: result.chain.length > 1 || result.removedMembers.length > 0,
                       _priorHistoryChecked: result.chain.length <= 1,
+                      _priorFinancialEvidence: [], _priorEvidenceOverflow: false,
                       _memberExitRequests: [], _memberExitStatus: result.removedMembers.length ? 'pending' : 'none',
                       _historicalActivityDetected: false,
                       _consentPolicy: result.consentPolicy, _inviteDecisions: [],
@@ -167,23 +169,7 @@ export const useStore = create((set, get) => ({
               // Even a seemingly empty current ledger may hide historical
               // transactions: watch old heads independently of new consent.
               if (result.chain.length > 1 && !activeSubs['prior_' + ref]) {
-                activeSubs['prior_' + ref] = subscribePriorRevisionActivity(current, result.chain, () => {
-                  if (currentSessionPubkey !== pubkey || get().getGroup(ref)?._revisionId !== head) return
-                  set(s => {
-                    const groups = s.groups.map(g => groupAddress(g) === ref
-                      ? { ...g, _financialReviewRequired: true, _historicalActivityDetected: true,
-                          _financialHistoryChecked: false,
-                          expenses: [], settlements: [], confirmations: [] }
-                      : g)
-                    saveGroups(pubkey, groups)
-                    return { groups }
-                  })
-                  for (const type of ['exp_', 'set_', 'conf_']) {
-                    activeSubs[type + ref]?.()
-                    delete activeSubs[type + ref]
-                  }
-                  delete subscribedMemberKeys[ref]
-                }, () => get().completePriorHistory(ref, head))
+                activeSubs['prior_' + ref] = subscribePriorRevisionActivity(current, result.chain, event => get().recordPriorFinancialEvidence(ref, head, event), () => get().completePriorHistory(ref, head))
               }
               if (!result.removedMembers.length) {
                 if (result.consentPolicy === CONSENT_POLICY) get().watchGroupInvitations(ref)
@@ -228,6 +214,38 @@ export const useStore = create((set, get) => ({
         })
       }
     )
+  },
+
+  // ─── PHASE 2E-A: READ-ONLY OLD-HEAD FINANCIAL EVIDENCE ────────────────────
+  recordPriorFinancialEvidence: (ref, head, event) => {
+    const account = get().pubkey
+    const group = get().getGroup(ref)
+    if (!account || currentSessionPubkey !== account || !group ||
+        group._revisionId !== head || group._revisionStatus !== 'verified') return
+    // The transport has already verified the Nostr signature. Any suspicious
+    // old-head event still blocks finance; a valid one is indexed for audit.
+    const evidence = priorFinancialEvidence(group, event)
+    set(s => {
+      const groups = s.groups.map(g => {
+        if (groupAddress(g) !== ref || g._revisionId !== head) return g
+        const update = evidence
+          ? appendPriorEvidence(g._priorFinancialEvidence || [], evidence)
+          : { rows: g._priorFinancialEvidence || [], overflow: true }
+        return { ...g, _priorFinancialEvidence: update.rows,
+          _priorEvidenceOverflow: !!g._priorEvidenceOverflow || update.overflow,
+          _historicalActivityDetected: true, _financialReviewRequired: true,
+          _financialHistoryChecked: false,
+          expenses: [], settlements: [], confirmations: [] }
+      })
+      saveGroups(account, groups)
+      return { groups }
+    })
+    // Stop current-head financial streams, never the old-head audit stream.
+    for (const prefix of ['exp_', 'set_', 'conf_']) {
+      activeSubs[prefix + ref]?.()
+      delete activeSubs[prefix + ref]
+    }
+    delete subscribedMemberKeys[ref]
   },
 
   // ─── PRIOR-REVISION FINANCIAL SAFETY BARRIER ─────────────────────────────
@@ -661,6 +679,7 @@ export const useStore = create((set, get) => ({
           ? { ...g, _revisions: chainResult.chain, _revisionStatus: 'verified',
               _financialReviewRequired: true, _financialHistoryChecked: false,
               _priorHistoryChecked: false,
+              _priorFinancialEvidence: [], _priorEvidenceOverflow: false,
               _consentPolicy: chainResult.consentPolicy, _inviteDecisions: [],
               _inviteStatus: 'pending', _expensePolicy: chainResult.expensePolicy,
               proposedExpenses: [], _expenseDecisions: [], _cancellationDecisions: [],
@@ -678,16 +697,7 @@ export const useStore = create((set, get) => ({
     const current = get().getGroup(ref)
     if (current?._revisionId === signedRevision.id) {
       if (chainResult.chain.length > 1) {
-        activeSubs['prior_' + ref] = subscribePriorRevisionActivity(current, chainResult.chain, () => {
-          if (get().pubkey !== account || get().getGroup(ref)?._revisionId !== signedRevision.id) return
-          set(s => {
-            const groups = s.groups.map(g => groupAddress(g) === ref
-              ? { ...g, _financialReviewRequired: true, _historicalActivityDetected: true, _financialHistoryChecked: false,
-                  expenses: [], settlements: [], confirmations: [] } : g)
-            saveGroups(account, groups)
-            return { groups }
-          })
-        }, () => get().completePriorHistory(ref, signedRevision.id))
+        activeSubs['prior_' + ref] = subscribePriorRevisionActivity(current, chainResult.chain, event => get().recordPriorFinancialEvidence(ref, signedRevision.id, event), () => get().completePriorHistory(ref, signedRevision.id))
       }
       get().watchGroupInvitations(ref)
       get().watchMemberExits(ref)
@@ -738,6 +748,7 @@ export const useStore = create((set, get) => ({
           ? { ...g, _revisions: result.chain, _revisionStatus: 'verified',
               _financialReviewRequired: true, _financialHistoryChecked: false,
               _priorHistoryChecked: false, _historicalActivityDetected: false,
+              _priorFinancialEvidence: [], _priorEvidenceOverflow: false,
               _memberExitRequests: [...(group._memberExitRequests || [])],
               _memberExitStatus: 'verified',
               _consentPolicy: result.consentPolicy, _inviteDecisions: [],
@@ -756,12 +767,7 @@ export const useStore = create((set, get) => ({
     const current = get().getGroup(ref)
     if (current?._revisionId === signedRevision.id) {
       // Monitor old financial activity but never rewrite older signed events.
-      activeSubs['prior_' + ref] = subscribePriorRevisionActivity(current, result.chain, () => {
-        if (get().pubkey !== account || get().getGroup(ref)?._revisionId !== signedRevision.id) return
-        set(s => ({ groups: s.groups.map(g => groupAddress(g) === ref
-          ? { ...g, _financialReviewRequired: true, _historicalActivityDetected: true,
-              _financialHistoryChecked: false, expenses: [], settlements: [], confirmations: [] } : g) }))
-      }, () => get().completePriorHistory(ref, signedRevision.id))
+      activeSubs['prior_' + ref] = subscribePriorRevisionActivity(current, result.chain, event => get().recordPriorFinancialEvidence(ref, signedRevision.id, event), () => get().completePriorHistory(ref, signedRevision.id))
       get().watchMemberExits(ref)
       get().watchGroupInvitations(ref)
     }

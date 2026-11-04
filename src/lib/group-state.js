@@ -48,12 +48,15 @@ export function mergeVerifiedGroup(groups, incoming) {
       _memberExitRequests: revisionChanged ? [] : existing._memberExitRequests || [],
       _memberExitStatus: revisionChanged ? 'pending' : existing._memberExitStatus || 'none',
       _historicalActivityDetected: revisionChanged ? false : !!existing._historicalActivityDetected,
-      _priorHistoryChecked: revisionChanged ? false : !!existing._priorHistoryChecked }
+      _priorHistoryChecked: revisionChanged ? false : !!existing._priorHistoryChecked,
+      _priorFinancialEvidence: revisionChanged ? [] : existing._priorFinancialEvidence || [],
+      _priorEvidenceOverflow: revisionChanged ? false : !!existing._priorEvidenceOverflow }
     : { ...incoming, expenses: [], settlements: [], confirmations: [], _synced: false,
       _revisions: [], _revisionStatus: incoming._revisionId ? 'pending' : 'legacy',
       _financialReviewRequired: false, proposedExpenses: [],
       _expenseDecisions: [], _cancellationDecisions: [], _expenseReviewRequired: false,
       _priorHistoryChecked: false,
+      _priorFinancialEvidence: [], _priorEvidenceOverflow: false,
       _memberExitRequests: [], _memberExitStatus: 'none', _historicalActivityDetected: false,
       _financialHistoryChecked: false,
       _expensePolicy: incoming._expensePolicy || null }
