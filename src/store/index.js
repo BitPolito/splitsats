@@ -12,6 +12,7 @@ import { isConfirmedSettlement } from '../lib/settlement-status'
 import { CONSENT_POLICY, invitationTags, parseInvitationDecisionEvent, invitationSummary, invitationReceiptTags, hasInvitationReceipts } from '../lib/group-invitations'
 import { EXPENSE_POLICY, expenseDecisionTags, parseExpenseDecisionEvent, expenseApprovalSummary, reconcileExpenseApprovals } from '../lib/expense-approvals'
 import { assertCanAddGroupMember } from '../lib/member-additions'
+import { canResumeAfterPriorHistory } from '../lib/prior-history-gate'
 import { memberExitTags, parseMemberExitRequestEvent, verifyMemberExitProofs, assertCanRequestExit, assertCanFinalizeExit } from '../lib/member-exits'
 import { expenseCancellationTags, parseExpenseCancellationEvent, expenseCancellationSummary } from '../lib/expense-cancellations'
 
@@ -145,7 +146,8 @@ export const useStore = create((set, get) => ({
                 set(s => {
                   const groups = s.groups.map(g => groupAddress(g) === ref
                     ? { ...g, _revisions: result.chain, _revisionStatus: 'verified',
-                      _financialReviewRequired: result.removedMembers.length > 0,
+                      _financialReviewRequired: result.chain.length > 1 || result.removedMembers.length > 0,
+                      _priorHistoryChecked: result.chain.length <= 1,
                       _memberExitRequests: [], _memberExitStatus: result.removedMembers.length ? 'pending' : 'none',
                       _historicalActivityDetected: false,
                       _consentPolicy: result.consentPolicy, _inviteDecisions: [],
@@ -181,7 +183,7 @@ export const useStore = create((set, get) => ({
                     delete activeSubs[type + ref]
                   }
                   delete subscribedMemberKeys[ref]
-                })
+                }, () => get().completePriorHistory(ref, head))
               }
               if (!result.removedMembers.length) {
                 if (result.consentPolicy === CONSENT_POLICY) get().watchGroupInvitations(ref)
@@ -228,6 +230,37 @@ export const useStore = create((set, get) => ({
     )
   },
 
+  // ─── PRIOR-REVISION FINANCIAL SAFETY BARRIER ─────────────────────────────
+  completePriorHistory: (ref, head) => {
+    const account = get().pubkey
+    if (!account || currentSessionPubkey !== account ||
+        get().getGroup(ref)?._revisionId !== head) return
+    set(s => {
+      const groups = s.groups.map(g => groupAddress(g) === ref && g._revisionId === head
+        ? { ...g, _priorHistoryChecked: true } : g)
+      saveGroups(account, groups)
+      return { groups }
+    })
+    get().refreshPriorHistoryGate(ref)
+  },
+
+  refreshPriorHistoryGate: (ref) => {
+    const group = get().getGroup(ref)
+    if (!group) return
+    const verdict = verifyMemberExitProofs(group, group._memberExitRequests || [])
+    if (!canResumeAfterPriorHistory(group, verdict)) return
+    const account = get().pubkey
+    set(s => {
+      const groups = s.groups.map(g => groupAddress(g) === ref &&
+        g._revisionId === group._revisionId && g._priorHistoryChecked &&
+        !g._historicalActivityDetected
+        ? { ...g, _financialReviewRequired: false, _memberExitStatus: verdict } : g)
+      saveGroups(account, groups)
+      return { groups }
+    })
+    if (get().getGroup(ref)?._consentPolicy === CONSENT_POLICY) get().watchGroupInvitations(ref)
+  },
+
   // ─── SIGNED VOLUNTARY MEMBER EXITS ────────────────────────────────────────
 
   watchMemberExits: (ref) => {
@@ -251,7 +284,7 @@ export const useStore = create((set, get) => ({
     const requests = [...(group._memberExitRequests || []), request]
     const verdict = verifyMemberExitProofs(group, requests)
     const hasExit = group._revisions.some(r => !!r.exitedMember)
-    const canClear = hasExit && verdict === 'verified' && !group._historicalActivityDetected
+    const canClear = hasExit && canResumeAfterPriorHistory(group, verdict)
     set(s => {
       const groups = s.groups.map(g => groupAddress(g) === ref
         ? { ...g, _memberExitRequests: requests, _memberExitStatus: verdict,
@@ -626,7 +659,8 @@ export const useStore = create((set, get) => ({
         groupAddress(g) === ref && g.eventId === signed.id &&
         g._revisionId === signedRevision.id
           ? { ...g, _revisions: chainResult.chain, _revisionStatus: 'verified',
-              _financialReviewRequired: false, _financialHistoryChecked: false,
+              _financialReviewRequired: true, _financialHistoryChecked: false,
+              _priorHistoryChecked: false,
               _consentPolicy: chainResult.consentPolicy, _inviteDecisions: [],
               _inviteStatus: 'pending', _expensePolicy: chainResult.expensePolicy,
               proposedExpenses: [], _expenseDecisions: [], _cancellationDecisions: [],
@@ -653,7 +687,7 @@ export const useStore = create((set, get) => ({
             saveGroups(account, groups)
             return { groups }
           })
-        })
+        }, () => get().completePriorHistory(ref, signedRevision.id))
       }
       get().watchGroupInvitations(ref)
       get().watchMemberExits(ref)
@@ -702,8 +736,8 @@ export const useStore = create((set, get) => ({
         groupAddress(g) === ref && g.eventId === definition.id &&
         g._revisionId === signedRevision.id
           ? { ...g, _revisions: result.chain, _revisionStatus: 'verified',
-              _financialReviewRequired: false, _financialHistoryChecked: false,
-              _historicalActivityDetected: false,
+              _financialReviewRequired: true, _financialHistoryChecked: false,
+              _priorHistoryChecked: false, _historicalActivityDetected: false,
               _memberExitRequests: [...(group._memberExitRequests || [])],
               _memberExitStatus: 'verified',
               _consentPolicy: result.consentPolicy, _inviteDecisions: [],
@@ -727,7 +761,7 @@ export const useStore = create((set, get) => ({
         set(s => ({ groups: s.groups.map(g => groupAddress(g) === ref
           ? { ...g, _financialReviewRequired: true, _historicalActivityDetected: true,
               _financialHistoryChecked: false, expenses: [], settlements: [], confirmations: [] } : g) }))
-      })
+      }, () => get().completePriorHistory(ref, signedRevision.id))
       get().watchMemberExits(ref)
       get().watchGroupInvitations(ref)
     }

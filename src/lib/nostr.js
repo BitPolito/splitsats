@@ -208,7 +208,7 @@ export function subscribeExpenseCancellations(group, onCancellation, onEose) {
 // Historical signed activity after a membership change requires an explicit
 // financial reconciliation. The current consent protocol cannot yet replay
 // old-head payment approvals against a new-head roster.
-export function subscribePriorRevisionActivity(group, chain, onActivity) {
+export function subscribePriorRevisionActivity(group, chain, onActivity, onEose) {
   const address = groupAddress(group)
   const old = chain.slice(0, -1)
   const authors = [...new Set(old.flatMap(r => r.members))]
@@ -219,6 +219,7 @@ export function subscribePriorRevisionActivity(group, chain, onActivity) {
       authors, '#a': [address], '#g': [group.id],
       '#r': old.map(r => r.id), limit: 500 }],
     onEvent: onActivity,
+    onEose,
   })
 }
 
