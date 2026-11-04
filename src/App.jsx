@@ -32,6 +32,7 @@ export default function App() {
   const confirmSettlement = useStore(s => s.confirmSettlement)
   const decideInvitation = useStore(s => s.decideInvitation)
   const decideExpense = useStore(s => s.decideExpense)
+  const addGroupMember = useStore(s => s.addGroupMember)
   const cancelDisputedExpense = useStore(s => s.cancelDisputedExpense)
 
   // Revalidate the cached identity with the active NIP-07 signer before displaying data.
@@ -157,6 +158,7 @@ export default function App() {
           onConfirmSettlement={(settlementId) => confirmSettlement(groupAddress(liveGroup), settlementId)}
           onInviteDecision={(decision) => decideInvitation(groupAddress(liveGroup), decision)}
           onExpenseDecision={(expenseEventId, decision) => decideExpense(groupAddress(liveGroup), expenseEventId, decision)}
+          onAddMember={(member) => addGroupMember(groupAddress(liveGroup), member)}
           onCancelExpense={(expenseEventId) => cancelDisputedExpense(groupAddress(liveGroup), expenseEventId)}
         />
       ) : (

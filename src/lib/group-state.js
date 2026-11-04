@@ -43,11 +43,13 @@ export function mergeVerifiedGroup(groups, incoming) {
       _expenseDecisions: revisionChanged ? [] : existing._expenseDecisions || [],
       _cancellationDecisions: revisionChanged ? [] : existing._cancellationDecisions || [],
       _expenseReviewRequired: revisionChanged ? false : !!existing._expenseReviewRequired,
+      _financialHistoryChecked: revisionChanged ? false : !!existing._financialHistoryChecked,
       _expensePolicy: revisionChanged ? null : existing._expensePolicy || null }
     : { ...incoming, expenses: [], settlements: [], confirmations: [], _synced: false,
       _revisions: [], _revisionStatus: incoming._revisionId ? 'pending' : 'legacy',
       _financialReviewRequired: false, proposedExpenses: [],
       _expenseDecisions: [], _cancellationDecisions: [], _expenseReviewRequired: false,
+      _financialHistoryChecked: false,
       _expensePolicy: incoming._expensePolicy || null }
   let next = existing
     ? groups.map(group => groupAddress(group) === ref ? updated : group)

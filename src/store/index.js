@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { saveGroups, loadProfiles, saveProfiles, loadPubkey, savePubkey, clearAll, clearPubkey } from '../lib/storage'
 import { verifyCachedSigner } from '../lib/session-identity'
-import { publishEvent, fetchProfile, fetchGroups, subscribeGroupRevisions, subscribeGroupInvitations, subscribeExpenseDecisions, subscribeExpenseCancellations, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
+import { publishEvent, fetchProfile, fetchGroups, subscribeGroupRevisions, subscribeGroupInvitations, subscribeExpenseDecisions, subscribeExpenseCancellations, subscribePriorRevisionActivity, pendingOutbox, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
 import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION, KIND_GROUP_REVISION, KIND_GROUP_INVITATION, KIND_EXPENSE_DECISION, KIND_EXPENSE_CANCELLATION } from '../lib/constants'
 import { validPubkey } from '../lib/event-validation'
 import { groupAddress } from '../lib/group-history'
@@ -11,6 +11,7 @@ import { releaseConfirmedPaymentAttempt } from '../lib/payment-attempts'
 import { isConfirmedSettlement } from '../lib/settlement-status'
 import { CONSENT_POLICY, invitationTags, parseInvitationDecisionEvent, invitationSummary, invitationReceiptTags, hasInvitationReceipts } from '../lib/group-invitations'
 import { EXPENSE_POLICY, expenseDecisionTags, parseExpenseDecisionEvent, expenseApprovalSummary, reconcileExpenseApprovals } from '../lib/expense-approvals'
+import { assertCanAddGroupMember } from '../lib/member-additions'
 import { expenseCancellationTags, parseExpenseCancellationEvent, expenseCancellationSummary } from '../lib/expense-cancellations'
 
 const randId = () => crypto.randomUUID()
@@ -122,6 +123,8 @@ export const useStore = create((set, get) => ({
           delete activeSubs['approval_' + ref]
           activeSubs['cancel_' + ref]?.()
           delete activeSubs['cancel_' + ref]
+          activeSubs['prior_' + ref]?.()
+          delete activeSubs['prior_' + ref]
           activeSubs['rev_' + ref]?.()
           const head = live._revisionId
           const received = new Map()
@@ -144,10 +147,32 @@ export const useStore = create((set, get) => ({
                       _inviteStatus: result.consentPolicy ? 'pending' : 'legacy',
                       _expensePolicy: result.expensePolicy, proposedExpenses: [],
                       _expenseDecisions: [], _cancellationDecisions: [], _expenseReviewRequired: false,
+                      _financialHistoryChecked: false,
                       expenses: [], settlements: [], confirmations: [] }
                     : g)
                   saveGroups(pubkey, groups)
                   return { groups }
+                })
+              }
+              // Even a seemingly empty current ledger may hide historical
+              // transactions: watch old heads independently of new consent.
+              if (result.chain.length > 1 && !activeSubs['prior_' + ref]) {
+                activeSubs['prior_' + ref] = subscribePriorRevisionActivity(current, result.chain, () => {
+                  if (currentSessionPubkey !== pubkey || get().getGroup(ref)?._revisionId !== head) return
+                  set(s => {
+                    const groups = s.groups.map(g => groupAddress(g) === ref
+                      ? { ...g, _financialReviewRequired: true,
+                          _financialHistoryChecked: false,
+                          expenses: [], settlements: [], confirmations: [] }
+                      : g)
+                    saveGroups(pubkey, groups)
+                    return { groups }
+                  })
+                  for (const type of ['exp_', 'set_', 'conf_']) {
+                    activeSubs[type + ref]?.()
+                    delete activeSubs[type + ref]
+                  }
+                  delete subscribedMemberKeys[ref]
                 })
               }
               if (!result.removedMembers.length) {
@@ -274,6 +299,10 @@ export const useStore = create((set, get) => ({
     const groupOwner = group.pubkey
     const memberKey = `${groupOwner}:${group._revisionId || 'legacy'}:${[...new Set(members)].sort().join(',')}`
     if (activeSubs['exp_' + ref] && subscribedMemberKeys[ref] === memberKey) return
+    // EOSE is a best-effort sync barrier, NOT proof of complete relay history.
+    // A membership change is not even offered until all streams report EOSE.
+    set(s => ({ groups: s.groups.map(g => groupAddress(g) === ref
+      ? { ...g, _financialHistoryChecked: false } : g) }))
     for (const type of ['exp_', 'set_', 'conf_']) activeSubs[type + ref]?.()
     subscribedMemberKeys[ref] = memberKey
     const isCurrent = () => get().pubkey === subscriptionOwner &&
@@ -286,6 +315,17 @@ export const useStore = create((set, get) => ({
       ? event => membersForRevisionEvent(get().getGroup(ref)?._revisions, event)
       : null
     const canUseEvent = event => hasInvitationReceipts(get().getGroup(ref), event)
+    const eoseKinds = new Set()
+    const expectedEose = group._expensePolicy === EXPENSE_POLICY ? 5 : 3
+    const markHistoryEose = kind => {
+      if (!isCurrent()) return
+      eoseKinds.add(kind)
+      if (eoseKinds.size !== expectedEose) return
+      set(s => ({ groups: s.groups.map(g =>
+        groupAddress(g) === ref && g._revisionId === group._revisionId &&
+        !g._financialReviewRequired && !g._expenseReviewRequired
+          ? { ...g, _financialHistoryChecked: true } : g) }))
+    }
 
     const unsubExp = subscribeExpenses(
       groupId, members,
@@ -309,7 +349,7 @@ export const useStore = create((set, get) => ({
           return { groups }
         })
       },
-      () => {}, groupOwner, resolveEventMembers, canUseEvent
+      () => markHistoryEose('expense'), groupOwner, resolveEventMembers, canUseEvent
     )
 
     const unsubSet = subscribeSettlements(
@@ -332,7 +372,7 @@ export const useStore = create((set, get) => ({
           return { groups }
         })
       },
-      () => {}, groupOwner, resolveEventMembers, canUseEvent
+      () => markHistoryEose('settlement'), groupOwner, resolveEventMembers, canUseEvent
     )
 
     const unsubConf = subscribeConfirmations(
@@ -369,7 +409,7 @@ export const useStore = create((set, get) => ({
           } catch { /* Keep fail-closed on storage errors. */ }
         }
       },
-      () => {}, groupOwner, resolveEventMembers, canUseEvent
+      () => markHistoryEose('confirmation'), groupOwner, resolveEventMembers, canUseEvent
     )
 
     activeSubs['conf_' + ref] = unsubConf
@@ -389,13 +429,13 @@ export const useStore = create((set, get) => ({
           saveGroups(subscriptionOwner, groups)
           return { groups }
         })
-      }, () => {})
+      }, () => markHistoryEose('approval'))
       activeSubs['cancel_' + ref]?.()
       activeSubs['cancel_' + ref] = subscribeExpenseCancellations(group, cancellation => {
         if (get().pubkey !== subscriptionOwner || currentSessionPubkey !== subscriptionOwner ||
             get().getGroup(ref)?._revisionId !== cancellation.revisionEventId) return
         get().applyExpenseCancellation(ref, cancellation)
-      }, () => {})
+      }, () => markHistoryEose('cancellation'))
     }
   },
 
@@ -453,6 +493,7 @@ export const useStore = create((set, get) => ({
       _consentPolicy: CONSENT_POLICY, _inviteDecisions: [], _inviteStatus: 'pending',
       _expensePolicy: EXPENSE_POLICY, proposedExpenses: [], _expenseDecisions: [],
       _cancellationDecisions: [], _expenseReviewRequired: false,
+      _financialHistoryChecked: false,
       _groupCreatedAt: signed.created_at, expenses: [], settlements: [], confirmations: [], _synced: true }
     set(s => {
       const merged = mergeVerifiedGroup(s.groups, newGroup)
@@ -468,7 +509,8 @@ export const useStore = create((set, get) => ({
               _financialReviewRequired: false, _consentPolicy: CONSENT_POLICY,
               _inviteDecisions: [], _inviteStatus: 'pending',
               _expensePolicy: EXPENSE_POLICY, proposedExpenses: [],
-              _expenseDecisions: [], _cancellationDecisions: [], _expenseReviewRequired: false }
+              _expenseDecisions: [], _cancellationDecisions: [], _expenseReviewRequired: false,
+              _financialHistoryChecked: false }
           : g)
       saveGroups(pubkey, updated)
       return { groups: updated, toast: `Gruppo "${name}" creato` }
@@ -480,6 +522,82 @@ export const useStore = create((set, get) => ({
     get().watchGroupInvitations(groupAddress(newGroup))
     members.forEach(m => get().fetchAndCacheProfile(m))
     return groupId
+  },
+
+  // ─── PHASE 2D-A: OWNER-SIGNED MEMBER ADDITION ───────────────────────────
+
+  addGroupMember: async (ref, rawMember) => {
+    const account = get().pubkey
+    const group = get().getGroup(ref)
+    const member = npubToHex(typeof rawMember === 'string' ? rawMember.trim() : '')
+    const nextMembers = assertCanAddGroupMember(group, account, member, pendingOutbox(account))
+    const previousHead = group._revisionId
+    const nextVersion = group._revisions.at(-1).version + 1
+    // Step 1: immutable revision; if the definition cannot be published,
+    // the durable outbox retains the exact signed bytes. NEVER sign a new
+    // revision until a failed/uncertain publication has been reconciled.
+    const signedRevision = await publishEvent(account, KIND_GROUP_REVISION,
+      { groupId: group.id, version: nextVersion,
+        previousRevisionId: previousHead, members: nextMembers },
+      revisionTags(group, nextMembers, previousHead))
+    const parsed = parseGroupRevisionEvent(signedRevision, group)
+    if (!parsed) throw new Error('Revisione firmata non valida: verifica la outbox')
+    const chainResult = verifyGroupRevisionHistory(
+      { ...group, members: nextMembers, _revisionId: signedRevision.id },
+      [...group._revisions, parsed])
+    if (chainResult.status !== 'verified' || chainResult.removedMembers.length) {
+      throw new Error('Nuova catena non verificabile: blocco di sicurezza')
+    }
+    if (get().pubkey !== account || get().getGroup(ref)?._revisionId !== previousHead) {
+      throw new Error('Account o revisione cambiati: non firmare nuovi eventi, verifica la outbox')
+    }
+    // Step 2: replaceable signed definition points to the exact immutable head.
+    const signed = await publishEvent(account, KIND_GROUP,
+      { id: group.id, name: group.name, members: nextMembers,
+        createdAt: group.createdAt, revisionEventId: signedRevision.id },
+      [['d', group.id], ['r', signedRevision.id], ['t', 'splitsats'],
+        ...nextMembers.map(pk => ['p', pk])])
+    if (get().pubkey !== account) return
+    const incoming = { ...group, members: nextMembers, _revisionId: signedRevision.id,
+      eventId: signed.id, _groupCreatedAt: signed.created_at }
+    set(s => {
+      const next = mergeVerifiedGroup(s.groups, incoming).map(g =>
+        groupAddress(g) === ref && g.eventId === signed.id &&
+        g._revisionId === signedRevision.id
+          ? { ...g, _revisions: chainResult.chain, _revisionStatus: 'verified',
+              _financialReviewRequired: false, _financialHistoryChecked: false,
+              _consentPolicy: chainResult.consentPolicy, _inviteDecisions: [],
+              _inviteStatus: 'pending', _expensePolicy: chainResult.expensePolicy,
+              proposedExpenses: [], _expenseDecisions: [], _cancellationDecisions: [],
+              _expenseReviewRequired: false, expenses: [], settlements: [], confirmations: [] }
+          : g)
+      saveGroups(account, next)
+      return { groups: next, toast: 'Membro aggiunto: in attesa di nuovi consensi Nostr' }
+    })
+    // Stop listeners for the old head and listen for fresh signed consents.
+    for (const kind of ['exp_', 'set_', 'conf_', 'approval_', 'cancel_', 'inv_', 'rev_', 'prior_']) {
+      activeSubs[kind + ref]?.()
+      delete activeSubs[kind + ref]
+    }
+    delete subscribedMemberKeys[ref]
+    const current = get().getGroup(ref)
+    if (current?._revisionId === signedRevision.id) {
+      if (chainResult.chain.length > 1) {
+        activeSubs['prior_' + ref] = subscribePriorRevisionActivity(current, chainResult.chain, () => {
+          if (get().pubkey !== account || get().getGroup(ref)?._revisionId !== signedRevision.id) return
+          set(s => {
+            const groups = s.groups.map(g => groupAddress(g) === ref
+              ? { ...g, _financialReviewRequired: true, _financialHistoryChecked: false,
+                  expenses: [], settlements: [], confirmations: [] } : g)
+            saveGroups(account, groups)
+            return { groups }
+          })
+        })
+      }
+      get().watchGroupInvitations(ref)
+    }
+    get().fetchAndCacheProfile(member)
+    return signedRevision.id
   },
 
   // ─── EXPENSES ──────────────────────────────────────────────────────────────

@@ -3,7 +3,7 @@ import { simplifyDebts } from '../lib/balances'
 import { approvedSettlements, settlementStatus } from '../lib/settlement-status'
 import { getPaymentAttempt } from '../lib/payment-attempts'
 import { Avatar, Tag, Empty, SectionHeader, Button, truncate } from '../components/ui'
-import { hexToNpub } from '../lib/nostr'
+import { hexToNpub, isValidPubkey } from '../lib/nostr'
 import { CONSENT_POLICY, invitationSummary } from '../lib/group-invitations'
 import { EXPENSE_POLICY, expenseApprovalSummary } from '../lib/expense-approvals'
 import { expenseCancellationSummary, cancellationParticipants } from '../lib/expense-cancellations'
@@ -18,11 +18,14 @@ const statBox = (label, value, color) => (
   </div>
 )
 
-export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddExpense, onSettle, onConfirmSettlement, onInviteDecision, onExpenseDecision, onCancelExpense }) {
+export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddExpense, onSettle, onConfirmSettlement, onInviteDecision, onExpenseDecision, onCancelExpense, onAddMember }) {
   const [tab, setTab] = useState('expenses')
   const [confirmingId, setConfirmingId] = useState(null)
   const [confirmationError, setConfirmationError] = useState('')
   const [cancelBusy, setCancelBusy] = useState(null)
+  const [memberInput, setMemberInput] = useState('')
+  const [memberBusy, setMemberBusy] = useState(false)
+  const [memberError, setMemberError] = useState('')
   const [expenseBusy, setExpenseBusy] = useState(null)
   const [expenseError, setExpenseError] = useState('')
   const [invitationBusy, setInvitationBusy] = useState(false)
@@ -295,6 +298,21 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
         {/* MEMBRI */}
         {tab === 'members' && <>
           <div style={{ fontFamily: 'var(--pixel)', fontSize: 8, color: 'var(--blue)', marginBottom: 4 }}>// membri del gruppo</div>
+          {myPubkey === group.pubkey && group._consentPolicy === CONSENT_POLICY && <div style={{ border: '2px solid var(--blue)', padding: 10, fontFamily: 'var(--mono)', fontSize: 10 }}>
+            <div style={{ marginBottom: 8 }}>AGGIUNTA MEMBRI: disponibile solo nei gruppi senza spese, pagamenti o proposte. Tutti gli invitati dovranno accettare di nuovo la revisione firmata. Uscita e rimozione non sono ancora supportate.</div>
+            <input aria-label="Nuovo membro Nostr" placeholder="npub1… o hex pubkey"
+              value={memberInput} onChange={e => { setMemberInput(e.target.value); setMemberError('') }}
+              style={{ width: '100%', padding: 7, boxSizing: 'border-box', marginBottom: 6 }} />
+            <button disabled={memberBusy || !isValidPubkey(memberInput.trim()) ||
+              !group._financialHistoryChecked || locked}
+              onClick={async () => {
+                setMemberBusy(true); setMemberError('')
+                try { await onAddMember(memberInput); setMemberInput('') }
+                catch (error) { setMemberError(error.message || 'Aggiornamento non riuscito') }
+                finally { setMemberBusy(false) }
+              }}>AGGIUNGI MEMBRO</button>
+            {memberError && <div role="alert" style={{ color: 'var(--red)', marginTop: 8 }}>{memberError}</div>}
+          </div>}
           {members.map(m => {
             const profile   = profiles[m] || {}
             const name      = profile.name || truncate(m, 10)
