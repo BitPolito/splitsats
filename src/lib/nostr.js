@@ -12,6 +12,7 @@ import { KIND_EXPENSE_DECISION } from './constants'
 import { parseExpenseDecisionEvent } from './expense-approvals'
 import { KIND_EXPENSE_CANCELLATION } from './constants'
 import { parseExpenseCancellationEvent } from './expense-cancellations'
+import { parseFormerMemberExitHint } from './former-member-audit'
 import { KIND_HISTORICAL_ATTESTATION } from './constants'
 import { parseHistoricalAttestationEvent, historicalAttestationParticipants } from './historical-attestations'
 
@@ -138,6 +139,41 @@ export function fetchGroups(hexPubkey, onGroup, onDone) {
   })
 
   return () => { unsubAuthored(); unsubMember() }
+}
+
+// An ex-member can only discover *candidate* groups through their own signed
+// kind:9595 request. This does not establish active membership or access.
+export function subscribeFormerMemberExitHints(viewer, onHint) {
+  if (!/^[0-9a-f]{64}$/.test(viewer || '')) throw new Error('Identita non valida')
+  return pool.subscribe({
+    id: 'former_exit_hints_' + viewer,
+    filters: [{ kinds: [9595], authors: [viewer], '#t': ['splitsats'], limit: 200 }],
+    onEvent: event => {
+      const hint = parseFormerMemberExitHint(event, viewer)
+      if (hint) onHint(hint)
+    },
+  })
+}
+
+// Query the exact author-scoped, owner-signed current group definition.
+// It is parsed as the owner, NEVER as a fake invitation for the ex-member.
+// Authorization is checked later against the complete immutable revision log.
+export function subscribeFormerMemberGroupDefinition(hint, onGroup, onEose) {
+  if (!hint || !/^[0-9a-f]{64}$/.test(hint.owner || '') ||
+      typeof hint.groupId !== 'string' || hint.groupId.length < 1 || hint.groupId.length > 128 ||
+      hint.address !== `30001:${hint.owner}:${hint.groupId}`) {
+    throw new Error('Riferimento archivio non valido')
+  }
+  return pool.subscribe({
+    id: 'former_definition_' + hint.address,
+    filters: [{ kinds: [30001], authors: [hint.owner], '#d': [hint.groupId],
+      '#t': ['splitsats'], limit: 20 }],
+    onEvent: event => {
+      const group = parseGroupEvent(event, hint.owner, npubToHex)
+      if (group && groupAddress(group) === hint.address) onGroup(group)
+    },
+    onEose,
+  })
 }
 
 // Immutable group history: unlike kind:30001, kind:9591 is non-replaceable.
