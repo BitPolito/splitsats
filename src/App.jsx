@@ -3,6 +3,7 @@ import { useStore } from './store'
 import { Toast } from './components/ui'
 import { pendingOutbox, retryOutbox, subscribeOutbox } from './lib/nostr'
 import { groupAddress } from './lib/group-history'
+import { CONSENT_POLICY, invitationSummary } from './lib/group-invitations'
 
 import LoginView   from './views/LoginView'
 import GroupsView  from './views/GroupsView'
@@ -29,6 +30,8 @@ export default function App() {
   const addExpense       = useStore(s => s.addExpense)
   const recordSettlement = useStore(s => s.recordSettlement)
   const confirmSettlement = useStore(s => s.confirmSettlement)
+  const decideInvitation = useStore(s => s.decideInvitation)
+  const decideExpense = useStore(s => s.decideExpense)
 
   // Revalidate the cached identity with the active NIP-07 signer before displaying data.
   useEffect(() => { restoreSession() }, [restoreSession])
@@ -151,6 +154,8 @@ export default function App() {
           onAddExpense={() => setModal('addExpense')}
           onSettle={(debt) => { setSettleDebt(debt); setModal('settle') }}
           onConfirmSettlement={(settlementId) => confirmSettlement(groupAddress(liveGroup), settlementId)}
+          onInviteDecision={(decision) => decideInvitation(groupAddress(liveGroup), decision)}
+          onExpenseDecision={(expenseEventId, decision) => decideExpense(groupAddress(liveGroup), expenseEventId, decision)}
         />
       ) : (
         <>
@@ -197,7 +202,10 @@ export default function App() {
           ensureGroupCurrent={() => {
             const g = useStore.getState().getGroup(groupAddress(liveGroup))
             if (!g || (g._revisionId &&
-                (g._revisionStatus !== 'verified' || g._financialReviewRequired))) {
+                (g._revisionStatus !== 'verified' || g._financialReviewRequired)) ||
+                (g._consentPolicy === CONSENT_POLICY &&
+                  invitationSummary(g, g._inviteDecisions || []).status !== 'accepted') ||
+                g._expenseReviewRequired) {
               throw new Error('Registro gruppo non verificato: nessun pagamento deve partire')
             }
           }}

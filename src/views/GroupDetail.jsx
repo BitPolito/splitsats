@@ -4,6 +4,8 @@ import { approvedSettlements, settlementStatus } from '../lib/settlement-status'
 import { getPaymentAttempt } from '../lib/payment-attempts'
 import { Avatar, Tag, Empty, SectionHeader, Button, truncate } from '../components/ui'
 import { hexToNpub } from '../lib/nostr'
+import { CONSENT_POLICY, invitationSummary } from '../lib/group-invitations'
+import { EXPENSE_POLICY, expenseApprovalSummary } from '../lib/expense-approvals'
 
 const sats = (n) => Number(n).toLocaleString() + ' sat'
 const CATS = { food:'🍕', transport:'🚌', accommodation:'🏠', entertainment:'🎉', utilities:'⚡', other:'📦' }
@@ -15,13 +17,27 @@ const statBox = (label, value, color) => (
   </div>
 )
 
-export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddExpense, onSettle, onConfirmSettlement }) {
+export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddExpense, onSettle, onConfirmSettlement, onInviteDecision, onExpenseDecision }) {
   const [tab, setTab] = useState('expenses')
   const [confirmingId, setConfirmingId] = useState(null)
   const [confirmationError, setConfirmationError] = useState('')
+  const [expenseBusy, setExpenseBusy] = useState(null)
+  const [expenseError, setExpenseError] = useState('')
+  const [invitationBusy, setInvitationBusy] = useState(false)
+  const [invitationError, setInvitationError] = useState('')
+  const invitation = invitationSummary(group, group._inviteDecisions || [])
+  const inviteLocked = group._consentPolicy === CONSENT_POLICY && invitation.status !== 'accepted'
+  const myInvitation = (group._inviteDecisions || []).find(x => x.member === myPubkey)
+  const respondToInvitation = async (decision) => {
+    if (invitationBusy) return
+    setInvitationBusy(true); setInvitationError('')
+    try { await onInviteDecision(decision) }
+    catch (error) { setInvitationError(error.message || 'Errore invito Nostr') }
+    finally { setInvitationBusy(false) }
+  }
 
   const locked = Boolean(group._revisionId &&
-    (group._revisionStatus !== 'verified' || group._financialReviewRequired))
+    (group._revisionStatus !== 'verified' || group._financialReviewRequired)) || inviteLocked || !!group._expenseReviewRequired
   // Never render an incomplete ledger as if everybody were settled.
   const expenses = locked ? [] : (group.expenses || [])
   const settlements = locked ? [] : (group.settlements || [])
@@ -65,6 +81,35 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
           Saldi e pagamenti bloccati fino alla riconciliazione dello storico.
         </div>
       )}
+      {group._consentPolicy === CONSENT_POLICY && (
+        <section role="status" style={{ padding: '12px 16px', borderBottom: '2px solid var(--blue)',
+          fontFamily: 'var(--mono)', fontSize: 11, lineHeight: 1.8 }}>
+          {invitation.status === 'accepted' ? 'Inviti firmati: tutti i partecipanti hanno accettato.' :
+            invitation.status === 'declined' ? 'Un invitato ha rifiutato. Nessun nuovo debito puo essere creato.' :
+            invitation.status === 'conflict' ? 'Decisioni Nostr contraddittorie: gruppo bloccato.' :
+            `In attesa di ${invitation.pending.length} adesioni firmate. Nessun debito e attivo.`}
+          {invitationError && <div role="alert" style={{ color: 'var(--red)' }}>{invitationError}</div>}
+          {group._revisionStatus === 'verified' && myPubkey !== group.pubkey &&
+            !myInvitation && invitation.status === 'pending' && <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <button disabled={invitationBusy} onClick={() => respondToInvitation('accept')} style={{
+                border: '2px solid var(--blue)', background: 'var(--blue)', color: '#fff',
+                padding: '9px', fontFamily: 'var(--pixel)', fontSize: 7, cursor: 'pointer' }}>
+                ACCETTA INVITO
+              </button>
+              <button disabled={invitationBusy} onClick={() => respondToInvitation('decline')} style={{
+                border: '2px solid var(--red)', background: 'var(--surface)', color: 'var(--red)',
+                padding: '9px', fontFamily: 'var(--pixel)', fontSize: 7, cursor: 'pointer' }}>
+                RIFIUTA INVITO
+              </button>
+            </div>}
+          {myInvitation && <div>LA TUA RISPOSTA: {myInvitation.decision === 'accept' ? 'ACCETTATO' : 'RIFIUTATO'}</div>}
+        </section>
+      )}
+      {group._expenseReviewRequired && (
+        <div role="alert" style={{ padding: '10px 16px', color: 'var(--red)', fontFamily: 'var(--mono)', fontSize: 11 }}>
+          Una spesa e contestata o contiene decisioni contraddittorie. Saldi e pagamenti bloccati fino a revisione.
+        </div>
+      )}
       {group._revisionStatus === 'legacy' && (
         <div role="status" style={{ padding: '10px 16px', fontFamily: 'var(--mono)', fontSize: 10 }}>
           Gruppo legacy: nessun registro firmato delle revisioni. Verifica i saldi con i partecipanti.
@@ -101,7 +146,31 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
             title={`// ${expenses.length} spese`}
             action={<Button variant="ghost" size="sm" disabled={locked} onClick={onAddExpense} style={{ width: 'auto' }}>+ ADD</Button>}
           />
-          {expenses.length === 0 && <Empty icon="◻">NESSUNA SPESA ANCORA.</Empty>}
+          {expenseError && <div role="alert" style={{ color: 'var(--red)', fontFamily: 'var(--mono)', fontSize: 11 }}>{expenseError}</div>}
+          {group._expensePolicy === EXPENSE_POLICY && (group.proposedExpenses || []).map(exp => {
+            const result = expenseApprovalSummary(group, exp, group._expenseDecisions || [])
+            if (result.status === 'approved') return null
+            const canDecide = result.status === 'pending' && result.pending.includes(myPubkey) && !locked
+            return <div key={exp._eventId} style={{ background: 'var(--surface)', border: '2px solid var(--blue)', padding: '12px', fontFamily: 'var(--mono)', fontSize: 11 }}>
+              <div><span>{exp.description}</span> — {sats(exp.amount)}</div>
+              <div>{result.status === 'disputed' ? 'SPESA CONTESTATA' : result.status === 'conflict' ? 'DECISIONI IN CONFLITTO' : `IN ATTESA DI ${result.pending.length} APPROVAZIONI`}</div>
+              {canDecide && <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <button disabled={expenseBusy === exp._eventId} onClick={async () => {
+                  setExpenseBusy(exp._eventId); setExpenseError('')
+                  try { await onExpenseDecision(exp._eventId, 'approve') }
+                  catch (error) { setExpenseError(error.message || 'Approvazione non riuscita') }
+                  finally { setExpenseBusy(null) }
+                }}>APPROVA SPESA</button>
+                <button disabled={expenseBusy === exp._eventId} onClick={async () => {
+                  setExpenseBusy(exp._eventId); setExpenseError('')
+                  try { await onExpenseDecision(exp._eventId, 'dispute') }
+                  catch (error) { setExpenseError(error.message || 'Contestazione non riuscita') }
+                  finally { setExpenseBusy(null) }
+                }}>CONTESTA SPESA</button>
+              </div>}
+            </div>
+          })}
+          {expenses.length === 0 && !(group.proposedExpenses || []).length && <Empty icon="◻">NESSUNA SPESA ANCORA.</Empty>}
           {[...expenses].reverse().map(exp => {
             const paidByMe  = exp.paidBy === myPubkey
             const payerName = profiles[exp.paidBy]?.name || truncate(exp.paidBy, 6)

@@ -3,6 +3,7 @@
 // Missing/ambiguous history fails closed. The relay is not a source of finality.
 import { groupAddress } from './group-history.js'
 import { KIND_GROUP_REVISION } from './constants.js'
+import { EXPENSE_POLICY } from './expense-approvals.js'
 
 export { KIND_GROUP_REVISION }
 const HASH = /^[0-9a-f]{64}$/
@@ -29,7 +30,11 @@ export function parseGroupRevisionEvent(event, group) {
   if (!content || typeof content !== 'object' || Array.isArray(content) ||
       content.groupId !== group.id || !Number.isSafeInteger(content.version) ||
       content.version < 0 || content.version > 100 ||
-      !validMemberList(content.members) || !content.members.includes(group.pubkey)) return null
+      !validMemberList(content.members) || !content.members.includes(group.pubkey) ||
+      (content.consentPolicy !== undefined &&
+        (content.version !== 0 || content.consentPolicy !== 'signed-invites-v1')) ||
+      (content.expensePolicy !== undefined &&
+        (content.version !== 0 || content.expensePolicy !== EXPENSE_POLICY))) return null
   const prev = content.previousRevisionId
   if ((content.version === 0 && prev !== null) ||
       (content.version > 0 && !HASH.test(prev || ''))) return null
@@ -48,6 +53,8 @@ export function parseGroupRevisionEvent(event, group) {
     id: event.id, groupId: group.id, pubkey: event.pubkey,
     version: content.version, previousRevisionId: prev,
     members: [...content.members], createdAt: event.created_at,
+    ...(content.consentPolicy ? { consentPolicy: content.consentPolicy } : {}),
+    ...(content.expensePolicy ? { expensePolicy: content.expensePolicy } : {}),
   }
 }
 
@@ -75,6 +82,8 @@ export function verifyGroupRevisionHistory(group, candidateRevisions) {
     if (!r || !HASH.test(r.id || '') || r.pubkey !== group.pubkey || r.groupId !== group.id ||
         !Number.isSafeInteger(r.version) || r.version < 0 || r.version > 100 ||
         !validMemberList(r.members) || !r.members.includes(group.pubkey) ||
+        (r.consentPolicy != null && (r.version !== 0 || r.consentPolicy !== 'signed-invites-v1')) ||
+        (r.expensePolicy != null && (r.version !== 0 || r.expensePolicy !== EXPENSE_POLICY)) ||
         !Number.isSafeInteger(r.createdAt) || r.createdAt <= 0 ||
         (r.version === 0 ? r.previousRevisionId !== null : !HASH.test(r.previousRevisionId || ''))) {
       return { status: 'conflict', chain: [] }
@@ -106,7 +115,9 @@ export function verifyGroupRevisionHistory(group, candidateRevisions) {
       !sameMembers(chain.at(-1).members, group.members || [])) return { status: 'conflict', chain: [] }
   const allMembers = [...new Set(chain.flatMap(r => r.members))]
   const removedMembers = allMembers.filter(member => !group.members.includes(member))
-  return { status: 'verified', chain, allMembers, removedMembers }
+  return { status: 'verified', chain, allMembers, removedMembers,
+    consentPolicy: chain[0].consentPolicy || null,
+    expensePolicy: chain[0].expensePolicy || null }
 }
 
 // Every post-migration transaction must name a revision event it was signed

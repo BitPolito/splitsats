@@ -1,5 +1,6 @@
 import { simplifyDebts } from '../lib/balances'
 import { groupAddress } from '../lib/group-history'
+import { CONSENT_POLICY, invitationSummary } from '../lib/group-invitations'
 import { approvedSettlements } from '../lib/settlement-status'
 import { Avatar, SectionHeader, Button, Empty } from '../components/ui'
 
@@ -32,6 +33,9 @@ export default function GroupsView({ groups, myPubkey, profiles, onSelectGroup, 
         const net      = owedToMe - iOwe
         const awaitingHistory = !!(g._revisionId &&
           (g._revisionStatus !== 'verified' || g._financialReviewRequired))
+        const consent = invitationSummary(g, g._inviteDecisions || [])
+        const awaitingConsent = g._consentPolicy === CONSENT_POLICY && consent.status !== 'accepted'
+        const expenseDisputed = !!g._expenseReviewRequired
 
         return (
           <div
@@ -64,7 +68,11 @@ export default function GroupsView({ groups, myPubkey, profiles, onSelectGroup, 
                 border: `2px solid ${net === 0 ? 'var(--text3)' : net > 0 ? 'var(--green)' : 'var(--red)'}`,
                 padding: '4px 8px',
               }}>
-                {awaitingHistory ? 'STORICO DA VERIFICARE' : net === 0 ? 'PARI' : net > 0 ? `+${sats(net)}` : sats(net)}
+                {awaitingHistory ? 'STORICO DA VERIFICARE' : expenseDisputed ? 'SPESA CONTESTATA' : awaitingConsent ?
+                  consent.status === 'declined' ? 'INVITO RIFIUTATO' :
+                  consent.status === 'conflict' ? 'INVITO IN CONFLITTO' :
+                  (g.pubkey !== myPubkey && !(g._inviteDecisions || []).some(d => d.member === myPubkey)
+                    ? 'INVITO DA ACCETTARE' : 'INVITI IN ATTESA') : net === 0 ? 'PARI' : net > 0 ? `+${sats(net)}` : sats(net)}
               </div>
             </div>
 

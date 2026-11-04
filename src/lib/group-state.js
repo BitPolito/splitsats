@@ -38,10 +38,16 @@ export function mergeVerifiedGroup(groups, incoming) {
       _revisions: revisionChanged ? [] : existing._revisions || [],
       _revisionStatus: revisionChanged ? (incoming._revisionId ? 'pending' : 'legacy') :
         (existing._revisionStatus || (incoming._revisionId ? 'pending' : 'legacy')),
-      _financialReviewRequired: revisionChanged ? false : !!existing._financialReviewRequired }
+      _financialReviewRequired: revisionChanged ? false : !!existing._financialReviewRequired,
+      proposedExpenses: revisionChanged ? [] : existing.proposedExpenses || [],
+      _expenseDecisions: revisionChanged ? [] : existing._expenseDecisions || [],
+      _expenseReviewRequired: revisionChanged ? false : !!existing._expenseReviewRequired,
+      _expensePolicy: revisionChanged ? null : existing._expensePolicy || null }
     : { ...incoming, expenses: [], settlements: [], confirmations: [], _synced: false,
       _revisions: [], _revisionStatus: incoming._revisionId ? 'pending' : 'legacy',
-      _financialReviewRequired: false }
+      _financialReviewRequired: false, proposedExpenses: [],
+      _expenseDecisions: [], _expenseReviewRequired: false,
+      _expensePolicy: incoming._expensePolicy || null }
   let next = existing
     ? groups.map(group => groupAddress(group) === ref ? updated : group)
     : [...groups, updated]
