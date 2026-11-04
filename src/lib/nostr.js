@@ -10,6 +10,8 @@ import { KIND_GROUP_INVITATION } from './constants'
 import { parseInvitationDecisionEvent } from './group-invitations'
 import { KIND_EXPENSE_DECISION } from './constants'
 import { parseExpenseDecisionEvent } from './expense-approvals'
+import { KIND_EXPENSE_CANCELLATION } from './constants'
+import { parseExpenseCancellationEvent } from './expense-cancellations'
 
 // ─── npub ↔ hex conversion ────────────────────────────────────────────────────
 // Nostr relays always use hex pubkeys. npub is only a display format.
@@ -181,6 +183,23 @@ export function subscribeExpenseDecisions(group, onDecision, onEose) {
     onEvent: event => {
       const decision = parseExpenseDecisionEvent(event, group)
       if (decision) onDecision(decision)
+    },
+    onEose,
+  })
+}
+
+// Independent immutable cancellation signatures must continue to arrive
+// while a disputed group's financial ledger is locked.
+export function subscribeExpenseCancellations(group, onCancellation, onEose) {
+  const address = groupAddress(group)
+  if (!address || !group._revisionId) throw new Error('Revisione del gruppo non valida')
+  return pool.subscribe({
+    id: 'expense_cancellations_' + address,
+    filters: [{ kinds: [KIND_EXPENSE_CANCELLATION], authors: group.members,
+      '#a': [address], '#g': [group.id], '#r': [group._revisionId], limit: 500 }],
+    onEvent: event => {
+      const cancellation = parseExpenseCancellationEvent(event, group)
+      if (cancellation) onCancellation(cancellation)
     },
     onEose,
   })
