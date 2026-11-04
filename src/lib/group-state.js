@@ -27,10 +27,21 @@ export function mergeVerifiedGroup(groups, incoming) {
       !Array.isArray(incoming?.members) || !incoming.members.includes(incoming.pubkey)) return groups
   const existing = findGroupByRef(groups, ref)
   if (!isNewerGroupDefinition(existing, incoming)) return groups
+  // A new signed revision pointer invalidates ALL previously computed
+  // balances until the complete immutable chain has been replayed.
+  const revisionChanged = !!existing && (existing._revisionId || null) !== (incoming._revisionId || null)
   const updated = existing
     ? { ...existing, ...incoming,
-      expenses: existing.expenses || [], settlements: existing.settlements || [], confirmations: existing.confirmations || [] }
-    : { ...incoming, expenses: [], settlements: [], confirmations: [], _synced: false }
+      expenses: revisionChanged ? [] : existing.expenses || [],
+      settlements: revisionChanged ? [] : existing.settlements || [],
+      confirmations: revisionChanged ? [] : existing.confirmations || [],
+      _revisions: revisionChanged ? [] : existing._revisions || [],
+      _revisionStatus: revisionChanged ? (incoming._revisionId ? 'pending' : 'legacy') :
+        (existing._revisionStatus || (incoming._revisionId ? 'pending' : 'legacy')),
+      _financialReviewRequired: revisionChanged ? false : !!existing._financialReviewRequired }
+    : { ...incoming, expenses: [], settlements: [], confirmations: [], _synced: false,
+      _revisions: [], _revisionStatus: incoming._revisionId ? 'pending' : 'legacy',
+      _financialReviewRequired: false }
   let next = existing
     ? groups.map(group => groupAddress(group) === ref ? updated : group)
     : [...groups, updated]

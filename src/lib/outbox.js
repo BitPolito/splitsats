@@ -15,7 +15,7 @@ function outboxError(code, message) {
 function eventScope(event) {
   // A pending write must not be re-created with a new signature and ID.
   // Group creation has a new group ID each time: block *all* pending group creations.
-  if (event.kind === 30001) return '30001:all-pending-creations'
+  if (event.kind === 30001 || event.kind === 9591) return '30001:all-pending-creations'
   const group = event.tags?.find(tag => Array.isArray(tag) && tag[0] === 'g')?.[1] || ''
   return `${event.kind}:${group}`
 }

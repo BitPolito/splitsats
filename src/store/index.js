@@ -1,10 +1,11 @@
 import { create } from 'zustand'
 import { saveGroups, loadProfiles, saveProfiles, loadPubkey, savePubkey, clearAll, clearPubkey } from '../lib/storage'
 import { verifyCachedSigner } from '../lib/session-identity'
-import { publishEvent, fetchProfile, fetchGroups, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
-import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION } from '../lib/constants'
+import { publishEvent, fetchProfile, fetchGroups, subscribeGroupRevisions, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
+import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION, KIND_GROUP_REVISION } from '../lib/constants'
 import { validPubkey } from '../lib/event-validation'
 import { groupAddress } from '../lib/group-history'
+import { parseGroupRevisionEvent, revisionTags, verifyGroupRevisionHistory, membersForRevisionEvent } from '../lib/group-revision-log'
 import { findGroupByRef, mergeVerifiedGroup, mayApplyGroupTransaction } from '../lib/group-state'
 import { releaseConfirmedPaymentAttempt } from '../lib/payment-attempts'
 import { isConfirmedSettlement } from '../lib/settlement-status'
@@ -100,8 +101,71 @@ export const useStore = create((set, get) => ({
           saveGroups(pubkey, nextGroups)
           return { groups: nextGroups }
         })
-        // A new author with a colliding d-tag remains an independent group.
-        get().subscribeGroup(ref, groupData.members)
+        // Preserve an immutable, signed chain for ledger-enabled groups.
+        // Historical members are fetched only after the complete head->genesis
+        // chain has been reconstructed; current-member snapshots are not enough.
+        const live = get().getGroup(ref)
+        if (live?._revisionId) {
+          // If a new metadata revision points to another immutable head, stop
+          // all old transaction listeners before accepting any more balances.
+          for (const type of ['exp_', 'set_', 'conf_']) {
+            activeSubs[type + ref]?.()
+            delete activeSubs[type + ref]
+          }
+          delete subscribedMemberKeys[ref]
+          activeSubs['rev_' + ref]?.()
+          const head = live._revisionId
+          const received = new Map()
+          const onRevision = revision => {
+            if (currentSessionPubkey !== pubkey || get().getGroup(ref)?._revisionId !== head) return
+            received.set(revision.id, revision)
+            const current = get().getGroup(ref)
+            const result = verifyGroupRevisionHistory(current, [...received.values()])
+            if (result.status === 'pending') return
+            if (result.status === 'verified') {
+              const alreadyVerified = current._revisionStatus === 'verified' &&
+                current._revisions?.length === result.chain.length &&
+                current._revisions.at(-1)?.id === head
+              if (!alreadyVerified) {
+                set(s => {
+                  const groups = s.groups.map(g => groupAddress(g) === ref
+                    ? { ...g, _revisions: result.chain, _revisionStatus: 'verified',
+                      _financialReviewRequired: result.removedMembers.length > 0,
+                      expenses: [], settlements: [], confirmations: [] }
+                    : g)
+                  saveGroups(pubkey, groups)
+                  return { groups }
+                })
+              }
+              if (!result.removedMembers.length) get().subscribeGroup(ref, result.allMembers)
+            } else {
+              for (const type of ['exp_', 'set_', 'conf_']) {
+                activeSubs[type + ref]?.()
+                delete activeSubs[type + ref]
+              }
+              delete subscribedMemberKeys[ref]
+              set(s => {
+                const groups = s.groups.map(g => groupAddress(g) === ref
+                  ? { ...g, _revisionStatus: 'conflict', _revisions: [],
+                    expenses: [], settlements: [], confirmations: [] }
+                  : g)
+                saveGroups(pubkey, groups)
+                return { groups }
+              })
+            }
+          }
+          activeSubs['rev_' + ref] = subscribeGroupRevisions(live, onRevision, () => {
+            if (currentSessionPubkey !== pubkey) return
+            set(s => {
+              const groups = s.groups.map(g => groupAddress(g) === ref && g._revisionId === head &&
+                g._revisionStatus === 'pending' ? { ...g, _revisionStatus: 'incomplete' } : g)
+              return { groups }
+            })
+          })
+        } else {
+          // Legacy groups have no signed revision history; warn before use.
+          get().subscribeGroup(ref, live?.members || groupData.members)
+        }
         groupData.members.forEach(m => get().fetchAndCacheProfile(m))
       },
       () => {
@@ -120,15 +184,21 @@ export const useStore = create((set, get) => ({
   subscribeGroup: (ref, members) => {
     const group = get().getGroup(ref)
     const subscriptionOwner = get().pubkey
-    if (!group || !group.members.includes(subscriptionOwner)) return
+    if (!group || !group.members.includes(subscriptionOwner) ||
+        (group._revisionId && (group._revisionStatus !== 'verified' || group._financialReviewRequired))) return
     const groupId = group.id
     const groupOwner = group.pubkey
-    const memberKey = `${groupOwner}:${[...new Set(members)].sort().join(',')}`
+    const memberKey = `${groupOwner}:${group._revisionId || 'legacy'}:${[...new Set(members)].sort().join(',')}`
     if (activeSubs['exp_' + ref] && subscribedMemberKeys[ref] === memberKey) return
     for (const type of ['exp_', 'set_', 'conf_']) activeSubs[type + ref]?.()
     subscribedMemberKeys[ref] = memberKey
     const isCurrent = () => get().pubkey === subscriptionOwner &&
-      currentSessionPubkey === subscriptionOwner && subscribedMemberKeys[ref] === memberKey
+      currentSessionPubkey === subscriptionOwner && subscribedMemberKeys[ref] === memberKey &&
+      (!group._revisionId || (get().getGroup(ref)?._revisionStatus === 'verified' &&
+        !get().getGroup(ref)?._financialReviewRequired))
+    const resolveEventMembers = group._revisionId
+      ? event => membersForRevisionEvent(get().getGroup(ref)?._revisions, event)
+      : null
 
     const unsubExp = subscribeExpenses(
       groupId, members,
@@ -138,8 +208,9 @@ export const useStore = create((set, get) => ({
           if (!mayApplyGroupTransaction(s.groups, ref, expense)) return s
           const groups = s.groups.map(g => {
             if (groupAddress(g) !== ref) return g
-            if (!g.members.includes(expense._pubkey) || !g.members.includes(expense.paidBy) ||
-                !expense.splits.every(m => g.members.includes(m))) return g
+            const authorizedMembers = expense._membersAtRevision || g.members
+            if (!authorizedMembers.includes(expense._pubkey) || !authorizedMembers.includes(expense.paidBy) ||
+                !expense.splits.every(m => authorizedMembers.includes(m))) return g
             if (g.expenses.some(e => e._eventId === expense._eventId ||
               (e.id === expense.id && e._pubkey === expense._pubkey))) return g
             return { ...g, expenses: [...g.expenses, expense] }
@@ -148,7 +219,7 @@ export const useStore = create((set, get) => ({
           return { groups }
         })
       },
-      () => {}, groupOwner
+      () => {}, groupOwner, resolveEventMembers
     )
 
     const unsubSet = subscribeSettlements(
@@ -159,8 +230,9 @@ export const useStore = create((set, get) => ({
           if (!mayApplyGroupTransaction(s.groups, ref, settlement)) return s
           const groups = s.groups.map(g => {
             if (groupAddress(g) !== ref) return g
-            if (!g.members.includes(settlement._pubkey) || settlement._pubkey !== settlement.from ||
-                !g.members.includes(settlement.to)) return g
+            const authorizedMembers = settlement._membersAtRevision || g.members
+            if (!authorizedMembers.includes(settlement._pubkey) || settlement._pubkey !== settlement.from ||
+                !authorizedMembers.includes(settlement.to)) return g
             if ((g.settlements || []).some(e =>
               e._eventId === settlement._eventId ||
               (e.id && settlement.id && e.id === settlement.id && e._pubkey === settlement._pubkey))) return g
@@ -170,7 +242,7 @@ export const useStore = create((set, get) => ({
           return { groups }
         })
       },
-      () => {}, groupOwner
+      () => {}, groupOwner, resolveEventMembers
     )
 
     const unsubConf = subscribeConfirmations(
@@ -180,8 +252,9 @@ export const useStore = create((set, get) => ({
         set(s => {
           if (!mayApplyGroupTransaction(s.groups, ref, confirmation)) return s
           const groups = s.groups.map(g => {
-            if (groupAddress(g) !== ref || !g.members.includes(confirmation._pubkey) ||
-                !g.members.includes(confirmation.from) || !g.members.includes(confirmation.to)) return g
+            const authorizedMembers = confirmation._membersAtRevision || g.members
+            if (groupAddress(g) !== ref || !authorizedMembers.includes(confirmation._pubkey) ||
+                !authorizedMembers.includes(confirmation.from) || !authorizedMembers.includes(confirmation.to)) return g
             const confirmations = g.confirmations || []
             if (confirmations.some(c => c._eventId === confirmation._eventId)) return g
             return { ...g, confirmations: [...confirmations, confirmation] }
@@ -205,7 +278,7 @@ export const useStore = create((set, get) => ({
           } catch { /* Keep fail-closed on storage errors. */ }
         }
       },
-      () => {}, groupOwner
+      () => {}, groupOwner, resolveEventMembers
     )
 
     activeSubs['conf_' + ref] = unsubConf
@@ -240,25 +313,50 @@ export const useStore = create((set, get) => ({
         !Array.isArray(members) || members.length < 2 || members.length > 100 ||
         new Set(members).size !== members.length || !members.every(validPubkey) ||
         !members.includes(pubkey)) throw new Error('Nome o membri del gruppo non validi')
-    const groupId   = randId()
-    const groupData = { id: groupId, name, members, createdAt: now() }
+    const groupId = randId()
+    const baseGroup = { id: groupId, pubkey }
+    // Publish immutable genesis BEFORE the replaceable group definition.
+    // Partial delivery is recoverable via the signed outbox, not a new event.
+    const signedRevision = await publishEvent(pubkey, KIND_GROUP_REVISION,
+      { groupId, version: 0, previousRevisionId: null, members },
+      revisionTags(baseGroup, members))
+    const groupData = { id: groupId, name, members, createdAt: now(),
+      revisionEventId: signedRevision.id }
 
     const signed = await publishEvent(pubkey, KIND_GROUP, groupData, [
-      ['d', groupId],
+      ['d', groupId], ['r', signedRevision.id],
       ['t', 'splitsats'],
       ...members.map(m => ['p', m]),
     ])
 
     if (get().pubkey !== pubkey) return groupId // event accepted for the prior account
 
+    const ownRevision = parseGroupRevisionEvent(signedRevision, baseGroup)
+    if (!ownRevision) throw new Error('Revisione Nostr firmata non valida: sincronizza la outbox')
     const newGroup = { ...groupData, pubkey, eventId: signed.id,
+      _revisionId: signedRevision.id, _revisions: [ownRevision],
+      _revisionStatus: 'verified', _financialReviewRequired: false,
       _groupCreatedAt: signed.created_at, expenses: [], settlements: [], confirmations: [], _synced: true }
     set(s => {
-      const updated = mergeVerifiedGroup(s.groups, newGroup)
+      const merged = mergeVerifiedGroup(s.groups, newGroup)
+      const ref = groupAddress(newGroup)
+      // The creator has already signed, published and parsed the exact
+      // immutable genesis AND the replaceable group definition. Do not
+      // discard that locally verified history while waiting for a relay echo.
+      // A different or newer group head must never inherit this approval.
+      const updated = merged.map(g =>
+        groupAddress(g) === ref && g.eventId === signed.id &&
+        g._revisionId === signedRevision.id
+          ? { ...g, _revisions: [ownRevision], _revisionStatus: 'verified',
+              _financialReviewRequired: false }
+          : g)
       saveGroups(pubkey, updated)
       return { groups: updated, toast: `Gruppo "${name}" creato` }
     })
 
+    // The creator can now subscribe immediately, even if the relay has not
+    // echoed the group definition yet. Other accounts must still independently
+    // reconstruct the signed immutable revision chain from relays.
     get().subscribeGroup(groupAddress(newGroup), members)
     members.forEach(m => get().fetchAndCacheProfile(m))
     return groupId
@@ -270,6 +368,8 @@ export const useStore = create((set, get) => ({
     const { pubkey } = get()
     const group      = get().getGroup(groupRef)
     if (!group || !group.members.includes(pubkey)) throw new Error('Non sei membro di questo gruppo')
+    if (group._revisionId && (group._revisionStatus !== 'verified' || group._financialReviewRequired))
+      throw new Error('Storico del gruppo incompleto o da riconciliare: operazione bloccata')
     if (!Number.isSafeInteger(expense.amount) || expense.amount <= 0 ||
         !group.members.includes(expense.paidBy) || !Array.isArray(expense.splits) ||
         !expense.splits.length || new Set(expense.splits).size !== expense.splits.length ||
@@ -283,6 +383,7 @@ export const useStore = create((set, get) => ({
 
     const signed = await publishEvent(pubkey, KIND_EXPENSE, expenseData, [
       ['g', group.id], ['a', groupAddress(group)],
+      ...(group._revisionId ? [['r', group._revisionId]] : []),
       ['t', 'splitsats'],
       ...group.members.map(m => ['p', m]),
     ])
@@ -307,6 +408,8 @@ export const useStore = create((set, get) => ({
   recordSettlement: async (groupRef, { from, to, amount, method = 'manual', walletReported = false }) => {
     const { pubkey } = get()
     const group = get().getGroup(groupRef)
+    if (group?._revisionId && (group._revisionStatus !== 'verified' || group._financialReviewRequired))
+      throw new Error('Storico del gruppo incompleto o da riconciliare: pagamento bloccato')
     if (!group || !group.members.includes(from) || !group.members.includes(to) ||
         from !== pubkey || from === to || !Number.isSafeInteger(amount) || amount <= 0 ||
         !['manual', 'webln'].includes(method) ||
@@ -322,7 +425,9 @@ export const useStore = create((set, get) => ({
     const data = { id: randId(), from, to, amount, method, walletReported, settledAt: now() }
 
     const signed = await publishEvent(pubkey, KIND_SETTLEMENT, data, [
-      ['g', group.id], ['a', groupAddress(group)], ['p', to], ['t', 'splitsats'],
+      ['g', group.id], ['a', groupAddress(group)],
+      ...(group._revisionId ? [['r', group._revisionId]] : []),
+      ['p', to], ['t', 'splitsats'],
     ])
 
     if (get().pubkey !== pubkey) return
@@ -347,6 +452,8 @@ export const useStore = create((set, get) => ({
   confirmSettlement: async (groupRef, settlementId) => {
     const { pubkey } = get()
     const group = get().getGroup(groupRef)
+    if (group?._revisionId && (group._revisionStatus !== 'verified' || group._financialReviewRequired))
+      throw new Error('Storico del gruppo incompleto o da riconciliare: conferma bloccata')
     const settlement = group?.settlements?.find(s => s._eventId === settlementId)
     if (!group || !settlement || settlement.to !== pubkey ||
         !group.members.includes(settlement.from) || !group.members.includes(pubkey)) {
@@ -362,7 +469,9 @@ export const useStore = create((set, get) => ({
       confirmedAt: now(),
     }
     const signed = await publishEvent(pubkey, KIND_CONFIRMATION, data, [
-      ['g', group.id], ['a', groupAddress(group)], ['e', settlement._eventId], ['p', settlement.from], ['t', 'splitsats'],
+      ['g', group.id], ['a', groupAddress(group)],
+      ...(group._revisionId ? [['r', group._revisionId]] : []),
+      ['e', settlement._eventId], ['p', settlement.from], ['t', 'splitsats'],
     ])
     if (get().pubkey !== pubkey) return
     const confirmation = { ...data, _eventId: signed.id, _pubkey: pubkey }

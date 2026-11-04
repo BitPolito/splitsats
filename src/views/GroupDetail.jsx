@@ -20,10 +20,13 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
   const [confirmingId, setConfirmingId] = useState(null)
   const [confirmationError, setConfirmationError] = useState('')
 
-  const expenses    = group.expenses    || []
-  const settlements = group.settlements || []
-  const members     = group.members     || []
-  const confirmations = group.confirmations || []
+  const locked = Boolean(group._revisionId &&
+    (group._revisionStatus !== 'verified' || group._financialReviewRequired))
+  // Never render an incomplete ledger as if everybody were settled.
+  const expenses = locked ? [] : (group.expenses || [])
+  const settlements = locked ? [] : (group.settlements || [])
+  const members = group.members || []
+  const confirmations = locked ? [] : (group.confirmations || [])
   const approved = approvedSettlements(settlements, confirmations)
 
   const debts      = simplifyDebts(expenses, approved, members)
@@ -49,12 +52,24 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
-          {statBox('TOTALE',    sats(totalSpent), 'var(--text)')}
-          {statBox('DEVI',      sats(myDebt),     'var(--red)')}
-          {statBox('TI DEVONO', sats(myCredit),   'var(--green)')}
+          {statBox('TOTALE',    locked ? '—' : sats(totalSpent), 'var(--text)')}
+          {statBox('DEVI',      locked ? '—' : sats(myDebt), 'var(--red)')}
+          {statBox('TI DEVONO', locked ? '—' : sats(myCredit), 'var(--green')}
         </div>
       </div>
 
+      {locked && (
+        <div role="alert" style={{ padding: '10px 16px', borderBottom: '2px solid var(--red)',
+          color: 'var(--red)', fontFamily: 'var(--mono)', fontSize: 11 }}>
+          Registro delle revisioni Nostr incompleto, in conflitto o con membri rimossi.
+          Saldi e pagamenti bloccati fino alla riconciliazione dello storico.
+        </div>
+      )}
+      {group._revisionStatus === 'legacy' && (
+        <div role="status" style={{ padding: '10px 16px', fontFamily: 'var(--mono)', fontSize: 10 }}>
+          Gruppo legacy: nessun registro firmato delle revisioni. Verifica i saldi con i partecipanti.
+        </div>
+      )}
       {group._legacyQuarantined && (
         <div role="alert" style={{ padding: '10px 16px', borderBottom: '2px solid var(--red)', color: 'var(--red)', background: 'var(--surface)', fontFamily: 'var(--mono)', fontSize: 11 }}>
           Gruppi con lo stesso ID ma autori diversi: le vecchie transazioni prive del riferimento `a` sono state escluse dai saldi. Verifica lo storico prima di effettuare pagamenti.
@@ -84,7 +99,7 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
         {tab === 'expenses' && <>
           <SectionHeader
             title={`// ${expenses.length} spese`}
-            action={<Button variant="ghost" size="sm" onClick={onAddExpense} style={{ width: 'auto' }}>+ ADD</Button>}
+            action={<Button variant="ghost" size="sm" disabled={locked} onClick={onAddExpense} style={{ width: 'auto' }}>+ ADD</Button>}
           />
           {expenses.length === 0 && <Empty icon="◻">NESSUNA SPESA ANCORA.</Empty>}
           {[...expenses].reverse().map(exp => {
@@ -112,7 +127,8 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
         {/* SALDI */}
         {tab === 'balances' && <>
           <div style={{ fontFamily: 'var(--pixel)', fontSize: 8, color: 'var(--blue)', textTransform: 'uppercase', marginBottom: 4 }}>// chi deve cosa</div>
-          {debts.length === 0 && <Empty icon="✓">TUTTI IN PARI!</Empty>}
+          {locked && <Empty icon="!">SALDI NON VERIFICATI.</Empty>}
+          {!locked && debts.length === 0 && <Empty icon="✓">TUTTI IN PARI!</Empty>}
           {debts.map((d, i) => {
             const fromName = profiles[d.from]?.name || truncate(d.from, 6)
             const toName   = profiles[d.to]?.name   || truncate(d.to, 6)
@@ -136,7 +152,7 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
                   <div style={{ fontFamily: 'var(--pixel)', fontSize: 8, color: 'var(--blue)' }}>{sats(d.amount)}</div>
                 </div>
                 {isMe && (
-                  <button disabled={hasPending && !localAttempt} onClick={() => onSettle(d)} style={{
+                  <button disabled={locked || (hasPending && !localAttempt)} onClick={() => onSettle(d)} style={{
                     fontFamily: 'var(--pixel)', fontSize: 8, background: 'var(--blue)', color: '#fff',
                     border: '2px solid var(--blue)', padding: '7px 12px', cursor: 'pointer',
                   }}>
@@ -170,7 +186,7 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
                     </div>
                   </div>
                   {s.to === myPubkey && status !== 'confirmed' && (
-                    <button disabled={confirmingId === s._eventId} style={{ border: '2px solid var(--blue)', background: 'var(--blue)', color: 'white', padding: 8, fontFamily: 'var(--pixel)', fontSize: 7, cursor: 'pointer' }}
+                    <button disabled={locked || confirmingId === s._eventId} style={{ border: '2px solid var(--blue)', background: 'var(--blue)', color: 'white', padding: 8, fontFamily: 'var(--pixel)', fontSize: 7, cursor: 'pointer' }}
                       onClick={async () => {
                         if (!window.confirm(`Confermi di aver ricevuto ${s.amount} sat? Controlla prima il tuo wallet.`)) return
                         setConfirmingId(s._eventId); setConfirmationError('')

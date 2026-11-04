@@ -25,7 +25,8 @@ function QRCode({ value, size = 200 }) {
   )
 }
 
-export default function SettleModal({ debt, profiles, groupId, myPubkey, onClose, onSettled }) {
+export default function SettleModal({ debt, profiles, groupId, myPubkey, onClose, onSettled,
+  ensureGroupCurrent = () => {} }) {
   const [status,  setStatus]  = useState('idle')
   const [errMsg,  setErrMsg]  = useState('')
   const [invoice, setInvoice] = useState('')
@@ -95,6 +96,8 @@ export default function SettleModal({ debt, profiles, groupId, myPubkey, onClose
         }
         await payLightningAddress(lnAddress, debt.amount, {
           onWalletSubmission: async () => {
+            // Revalidate the *latest* group state before an external wallet receives an invoice.
+            await ensureGroupCurrent()
             // A signer switch while the invoice was resolving must fail closed.
             const activeSigner = await window.nostr?.getPublicKey?.()
             if (activeSigner !== myPubkey) throw new Error('Account Nostr cambiato: pagamento annullato prima dell’invio al wallet')
@@ -140,6 +143,7 @@ export default function SettleModal({ debt, profiles, groupId, myPubkey, onClose
       const { invoice: pr, attempt: record } = await prepareExternalWalletInvoice(
         lnAddress, debt.amount, scope, {
           ensureSigner: async () => {
+            await ensureGroupCurrent()
             const activeSigner = await window.nostr?.getPublicKey?.()
             if (myPubkey !== debt.from || activeSigner !== myPubkey) {
               throw new Error('Account Nostr diverso dal debitore: QR annullato prima della visualizzazione')
@@ -185,6 +189,7 @@ export default function SettleModal({ debt, profiles, groupId, myPubkey, onClose
     recordInFlight.current = true
     setStatus('recording'); setErrMsg('')
     try {
+      await ensureGroupCurrent()
       if (attempt?.status === 'submitted') {
         setAttempt(updatePaymentAttempt(scope, 'outcome-unknown'))
       }
