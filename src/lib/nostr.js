@@ -222,6 +222,26 @@ export function subscribePriorRevisionActivity(group, chain, onActivity) {
   })
 }
 
+// Voluntary leave requests stay retrievable by current members even after
+// the former member is no longer included in the replaceable group p tags.
+export function subscribeMemberExitRequests(group, parse, onRequest, onEose) {
+  const address = groupAddress(group)
+  if (!address || !Array.isArray(group._revisions) || !group._revisions.length) {
+    throw new Error('Catena membership mancante')
+  }
+  const authors = [...new Set(group._revisions.flatMap(r => r.members))]
+  return pool.subscribe({
+    id: 'member_exits_' + address,
+    filters: [{ kinds: [9595], authors, '#a': [address],
+      '#r': group._revisions.map(r => r.id), limit: 500 }],
+    onEvent: event => {
+      const request = parse(event, group)
+      if (request) onRequest(request)
+    },
+    onEose,
+  })
+}
+
 // ─── Expenses ─────────────────────────────────────────────────────────────────
 
 export function subscribeExpenses(groupId, hexMembers, onExpense, onEose, ownerPubkey = null, resolveEventMembers = null, canUseEvent = null) {

@@ -18,4 +18,6 @@ export const KIND_GROUP_INVITATION = 9592 // Invitee-signed consent decision
 export const KIND_EXPENSE_DECISION = 9593 // Participant-signed expense approval or dispute
 export const KIND_EXPENSE_CANCELLATION = 9594 // Participant-signed disputed proposal cancellation
 
+export const KIND_MEMBER_EXIT = 9595 // Voluntary member-signed leave request
+
 export const APP_TAG = 'splitsats'    // Tag all our events for filtering
