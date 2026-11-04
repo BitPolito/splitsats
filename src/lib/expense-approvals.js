@@ -4,6 +4,7 @@
 // approves exactly the proposal that their Nostr key signed.
 import { groupAddress } from './group-history.js'
 import { KIND_EXPENSE_DECISION } from './constants.js'
+import { expenseCancellationSummary } from './expense-cancellations.js'
 
 export const EXPENSE_POLICY = 'unanimous-expense-v1'
 const HASH = /^[0-9a-f]{64}$/
@@ -95,8 +96,14 @@ export function reconcileExpenseApprovals(group) {
   let reviewRequired = false
   for (const expense of proposals) {
     const result = expenseApprovalSummary(group, expense, decisions)
-    if (result.status === 'approved') approved.push(expense)
-    if (result.status === 'disputed' || result.status === 'conflict') reviewRequired = true
+    const cancel = expenseCancellationSummary(group, expense,
+      group._cancellationDecisions || [], result.status)
+    // A unanimous cancellation removes only this proposal from the ledger.
+    // It never erases the signed event or its recorded objections.
+    if (cancel.status === 'cancelled') continue
+    if (result.status === 'approved' && cancel.status === 'none') approved.push(expense)
+    if (result.status === 'disputed' || result.status === 'conflict' ||
+        (cancel.status !== 'none' && cancel.status !== 'cancelled')) reviewRequired = true
   }
   return { ...group, expenses: reviewRequired ? [] : approved,
     _expenseReviewRequired: reviewRequired }

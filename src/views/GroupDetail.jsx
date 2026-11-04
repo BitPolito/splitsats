@@ -6,6 +6,7 @@ import { Avatar, Tag, Empty, SectionHeader, Button, truncate } from '../componen
 import { hexToNpub } from '../lib/nostr'
 import { CONSENT_POLICY, invitationSummary } from '../lib/group-invitations'
 import { EXPENSE_POLICY, expenseApprovalSummary } from '../lib/expense-approvals'
+import { expenseCancellationSummary, cancellationParticipants } from '../lib/expense-cancellations'
 
 const sats = (n) => Number(n).toLocaleString() + ' sat'
 const CATS = { food:'🍕', transport:'🚌', accommodation:'🏠', entertainment:'🎉', utilities:'⚡', other:'📦' }
@@ -17,10 +18,11 @@ const statBox = (label, value, color) => (
   </div>
 )
 
-export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddExpense, onSettle, onConfirmSettlement, onInviteDecision, onExpenseDecision }) {
+export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddExpense, onSettle, onConfirmSettlement, onInviteDecision, onExpenseDecision, onCancelExpense }) {
   const [tab, setTab] = useState('expenses')
   const [confirmingId, setConfirmingId] = useState(null)
   const [confirmationError, setConfirmationError] = useState('')
+  const [cancelBusy, setCancelBusy] = useState(null)
   const [expenseBusy, setExpenseBusy] = useState(null)
   const [expenseError, setExpenseError] = useState('')
   const [invitationBusy, setInvitationBusy] = useState(false)
@@ -149,11 +151,29 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
           {expenseError && <div role="alert" style={{ color: 'var(--red)', fontFamily: 'var(--mono)', fontSize: 11 }}>{expenseError}</div>}
           {group._expensePolicy === EXPENSE_POLICY && (group.proposedExpenses || []).map(exp => {
             const result = expenseApprovalSummary(group, exp, group._expenseDecisions || [])
-            if (result.status === 'approved') return null
+            const cancellation = expenseCancellationSummary(group, exp,
+              group._cancellationDecisions || [], result.status)
+            if (result.status === 'approved' && cancellation.status === 'none') return null
             const canDecide = result.status === 'pending' && result.pending.includes(myPubkey) && !locked
+            const canCancel = result.status === 'disputed' &&
+              (cancellation.status === 'none' || cancellation.status === 'pending') &&
+              cancellationParticipants(exp).includes(myPubkey) &&
+              !cancellation.signed.includes(myPubkey) && !inviteLocked &&
+              group._revisionStatus === 'verified' && !group._financialReviewRequired &&
+              !(group.settlements || []).length && !(group.confirmations || []).length
             return <div key={exp._eventId} style={{ background: 'var(--surface)', border: '2px solid var(--blue)', padding: '12px', fontFamily: 'var(--mono)', fontSize: 11 }}>
               <div><span>{exp.description}</span> — {sats(exp.amount)}</div>
-              <div>{result.status === 'disputed' ? 'SPESA CONTESTATA' : result.status === 'conflict' ? 'DECISIONI IN CONFLITTO' : `IN ATTESA DI ${result.pending.length} APPROVAZIONI`}</div>
+              <div>{cancellation.status === 'cancelled' ? 'SPESA ANNULLATA CON CONSENSO' :
+                result.status === 'disputed' ? `SPESA CONTESTATA · ${cancellation.signed.length} FIRME ANNULLAMENTO` :
+                result.status === 'conflict' ? 'DECISIONI IN CONFLITTO' :
+                `IN ATTESA DI ${result.pending.length} APPROVAZIONI`}</div>
+              {canCancel && <button disabled={cancelBusy === exp._eventId} onClick={async () => {
+                if (!window.confirm('Annullare definitivamente questa proposta? Tutti i partecipanti coinvolti devono firmare.')) return
+                setCancelBusy(exp._eventId); setExpenseError('')
+                try { await onCancelExpense(exp._eventId) }
+                catch (error) { setExpenseError(error.message || 'Annullamento non riuscito') }
+                finally { setCancelBusy(null) }
+              }}>FIRMA ANNULLAMENTO</button>}
               {canDecide && <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                 <button disabled={expenseBusy === exp._eventId} onClick={async () => {
                   setExpenseBusy(exp._eventId); setExpenseError('')

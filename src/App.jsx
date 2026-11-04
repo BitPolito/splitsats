@@ -32,6 +32,7 @@ export default function App() {
   const confirmSettlement = useStore(s => s.confirmSettlement)
   const decideInvitation = useStore(s => s.decideInvitation)
   const decideExpense = useStore(s => s.decideExpense)
+  const cancelDisputedExpense = useStore(s => s.cancelDisputedExpense)
 
   // Revalidate the cached identity with the active NIP-07 signer before displaying data.
   useEffect(() => { restoreSession() }, [restoreSession])
@@ -156,6 +157,7 @@ export default function App() {
           onConfirmSettlement={(settlementId) => confirmSettlement(groupAddress(liveGroup), settlementId)}
           onInviteDecision={(decision) => decideInvitation(groupAddress(liveGroup), decision)}
           onExpenseDecision={(expenseEventId, decision) => decideExpense(groupAddress(liveGroup), expenseEventId, decision)}
+          onCancelExpense={(expenseEventId) => cancelDisputedExpense(groupAddress(liveGroup), expenseEventId)}
         />
       ) : (
         <>
