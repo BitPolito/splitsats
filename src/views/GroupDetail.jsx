@@ -8,6 +8,7 @@ import { CONSENT_POLICY, invitationSummary } from '../lib/group-invitations'
 import { EXPENSE_POLICY, expenseApprovalSummary } from '../lib/expense-approvals'
 import { expenseCancellationSummary, cancellationParticipants } from '../lib/expense-cancellations'
 import { priorEvidenceCounts } from '../lib/prior-financial-evidence'
+import { replayHistoricalFinancialEvents } from '../lib/historical-financial-replay'
 
 const sats = (n) => Number(n).toLocaleString() + ' sat'
 const CATS = { food:'🍕', transport:'🚌', accommodation:'🏠', entertainment:'🎉', utilities:'⚡', other:'📦' }
@@ -103,6 +104,25 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
           {(group._priorFinancialEvidence || []).slice(0, 10).map(e =>
             <div key={e.eventId}>kind:{e.kind} · rev:{e.revisionId.slice(0, 10)} · id:{e.eventId.slice(0, 12)}</div>)}
           {(group._priorFinancialEvidence || []).length > 10 && <div>Altri eventi nel registro: non mostrati qui.</div>}
+          {(() => {
+            const replay = replayHistoricalFinancialEvents(group, group._priorReplayEvents || [],
+              { overflow: !!group._priorReplayOverflow })
+            return <div style={{ borderTop: '1px solid var(--red)', marginTop: 8, paddingTop: 8 }}>
+              <strong>SIMULAZIONE DELLE REVISIONI PRECEDENTI — NON DEFINITIVA</strong>
+              <div>Stato: {replay.status} · {replay.reason}</div>
+              {replay.revisions.map(rev => <div key={rev.revisionId}>
+                Revisione {rev.revisionId.slice(0, 10)} · proposte {rev.proposedExpenses}
+                · approvate {rev.approvedExpenses} · pagamenti confermati {rev.confirmedPayments}
+                · non confermati {rev.pendingPayments}
+              </div>)}
+              {replay.status === 'observed' && replay.observedNet && <div>
+                <strong>Saldi storici dei soli eventi osservati (satoshi, NON pagabili)</strong>
+                {Object.entries(replay.observedNet).filter(([, n]) => n !== 0).slice(0, 12).map(([pk, n]) =>
+                  <div key={pk}>{pk.slice(0, 12)}…: {n > 0 ? '+' : ''}{n} sat</div>)}
+              </div>}
+              <div>Nostr EOSE non prova completezza o finalità. Il blocco dei pagamenti rimane attivo.</div>
+            </div>
+          })()}
           <div>Questi dati sono prove Nostr, non debiti calcolati. Nessun pagamento automatico.</div>
         </section>
       )}

@@ -14,6 +14,7 @@ import { EXPENSE_POLICY, expenseDecisionTags, parseExpenseDecisionEvent, expense
 import { assertCanAddGroupMember } from '../lib/member-additions'
 import { canResumeAfterPriorHistory } from '../lib/prior-history-gate'
 import { priorFinancialEvidence, appendPriorEvidence } from '../lib/prior-financial-evidence'
+import { appendHistoricalReplayEvent } from '../lib/historical-financial-replay'
 import { memberExitTags, parseMemberExitRequestEvent, verifyMemberExitProofs, assertCanRequestExit, assertCanFinalizeExit } from '../lib/member-exits'
 import { expenseCancellationTags, parseExpenseCancellationEvent, expenseCancellationSummary } from '../lib/expense-cancellations'
 
@@ -150,6 +151,7 @@ export const useStore = create((set, get) => ({
                       _financialReviewRequired: result.chain.length > 1 || result.removedMembers.length > 0,
                       _priorHistoryChecked: result.chain.length <= 1,
                       _priorFinancialEvidence: [], _priorEvidenceOverflow: false,
+                      _priorReplayEvents: [], _priorReplayOverflow: false,
                       _memberExitRequests: [], _memberExitStatus: result.removedMembers.length ? 'pending' : 'none',
                       _historicalActivityDetected: false,
                       _consentPolicy: result.consentPolicy, _inviteDecisions: [],
@@ -222,25 +224,34 @@ export const useStore = create((set, get) => ({
     const group = get().getGroup(ref)
     if (!account || currentSessionPubkey !== account || !group ||
         group._revisionId !== head || group._revisionStatus !== 'verified') return
-    // The transport has already verified the Nostr signature. Any suspicious
-    // old-head event still blocks finance; a valid one is indexed for audit.
-    const evidence = priorFinancialEvidence(group, event)
+    // RelayPool verified this immutable signature before dispatch. Historical
+    // 9592 acceptances are used ONLY to validate old receipts, not as debts.
+    const isInvitation = event?.kind === KIND_GROUP_INVITATION
+    const evidence = isInvitation ? null : priorFinancialEvidence(group, event)
     set(s => {
       const groups = s.groups.map(g => {
         if (groupAddress(g) !== ref || g._revisionId !== head) return g
-        const update = evidence
-          ? appendPriorEvidence(g._priorFinancialEvidence || [], evidence)
-          : { rows: g._priorFinancialEvidence || [], overflow: true }
-        return { ...g, _priorFinancialEvidence: update.rows,
-          _priorEvidenceOverflow: !!g._priorEvidenceOverflow || update.overflow,
-          _historicalActivityDetected: true, _financialReviewRequired: true,
-          _financialHistoryChecked: false,
-          expenses: [], settlements: [], confirmations: [] }
+        const replay = appendHistoricalReplayEvent(g._priorReplayEvents || [], event)
+        const update = isInvitation
+          ? { rows: g._priorFinancialEvidence || [], overflow: false }
+          : evidence
+            ? appendPriorEvidence(g._priorFinancialEvidence || [], evidence)
+            : { rows: g._priorFinancialEvidence || [], overflow: true }
+        const unsafe = !isInvitation || replay.overflow
+        return { ...g, _priorReplayEvents: replay.events,
+          _priorReplayOverflow: !!g._priorReplayOverflow || replay.overflow,
+          _priorFinancialEvidence: update.rows,
+          _priorEvidenceOverflow: !!g._priorEvidenceOverflow || update.overflow || replay.overflow,
+          _historicalActivityDetected: unsafe || !!g._historicalActivityDetected,
+          _financialReviewRequired: unsafe || !!g._financialReviewRequired,
+          _financialHistoryChecked: unsafe ? false : g._financialHistoryChecked,
+          ...(unsafe ? { expenses: [], settlements: [], confirmations: [] } : {}) }
       })
       saveGroups(account, groups)
       return { groups }
     })
-    // Stop current-head financial streams, never the old-head audit stream.
+    if (isInvitation && !get().getGroup(ref)?._priorReplayOverflow) return
+    // Any earlier financial event or replay overflow freezes current-head finance.
     for (const prefix of ['exp_', 'set_', 'conf_']) {
       activeSubs[prefix + ref]?.()
       delete activeSubs[prefix + ref]
@@ -680,6 +691,7 @@ export const useStore = create((set, get) => ({
               _financialReviewRequired: true, _financialHistoryChecked: false,
               _priorHistoryChecked: false,
               _priorFinancialEvidence: [], _priorEvidenceOverflow: false,
+              _priorReplayEvents: [], _priorReplayOverflow: false,
               _consentPolicy: chainResult.consentPolicy, _inviteDecisions: [],
               _inviteStatus: 'pending', _expensePolicy: chainResult.expensePolicy,
               proposedExpenses: [], _expenseDecisions: [], _cancellationDecisions: [],
@@ -749,6 +761,7 @@ export const useStore = create((set, get) => ({
               _financialReviewRequired: true, _financialHistoryChecked: false,
               _priorHistoryChecked: false, _historicalActivityDetected: false,
               _priorFinancialEvidence: [], _priorEvidenceOverflow: false,
+              _priorReplayEvents: [], _priorReplayOverflow: false,
               _memberExitRequests: [...(group._memberExitRequests || [])],
               _memberExitStatus: 'verified',
               _consentPolicy: result.consentPolicy, _inviteDecisions: [],

@@ -215,7 +215,7 @@ export function subscribePriorRevisionActivity(group, chain, onActivity, onEose)
   if (!address || !old.length || !authors.length) throw new Error('Storico revisioni non valido')
   return pool.subscribe({
     id: 'prior_finance_' + address,
-    filters: [{ kinds: [9000, 9001, 9002, KIND_EXPENSE_DECISION, KIND_EXPENSE_CANCELLATION],
+    filters: [{ kinds: [KIND_GROUP_INVITATION, 9000, 9001, 9002, KIND_EXPENSE_DECISION, KIND_EXPENSE_CANCELLATION],
       authors, '#a': [address], '#g': [group.id],
       '#r': old.map(r => r.id), limit: 500 }],
     onEvent: onActivity,
