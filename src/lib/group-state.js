@@ -44,11 +44,15 @@ export function mergeVerifiedGroup(groups, incoming) {
       _cancellationDecisions: revisionChanged ? [] : existing._cancellationDecisions || [],
       _expenseReviewRequired: revisionChanged ? false : !!existing._expenseReviewRequired,
       _financialHistoryChecked: revisionChanged ? false : !!existing._financialHistoryChecked,
-      _expensePolicy: revisionChanged ? null : existing._expensePolicy || null }
+      _expensePolicy: revisionChanged ? null : existing._expensePolicy || null,
+      _memberExitRequests: revisionChanged ? [] : existing._memberExitRequests || [],
+      _memberExitStatus: revisionChanged ? 'pending' : existing._memberExitStatus || 'none',
+      _historicalActivityDetected: revisionChanged ? false : !!existing._historicalActivityDetected }
     : { ...incoming, expenses: [], settlements: [], confirmations: [], _synced: false,
       _revisions: [], _revisionStatus: incoming._revisionId ? 'pending' : 'legacy',
       _financialReviewRequired: false, proposedExpenses: [],
       _expenseDecisions: [], _cancellationDecisions: [], _expenseReviewRequired: false,
+      _memberExitRequests: [], _memberExitStatus: 'none', _historicalActivityDetected: false,
       _financialHistoryChecked: false,
       _expensePolicy: incoming._expensePolicy || null }
   let next = existing

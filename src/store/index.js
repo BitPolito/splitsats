@@ -1,8 +1,8 @@
 import { create } from 'zustand'
 import { saveGroups, loadProfiles, saveProfiles, loadPubkey, savePubkey, clearAll, clearPubkey } from '../lib/storage'
 import { verifyCachedSigner } from '../lib/session-identity'
-import { publishEvent, fetchProfile, fetchGroups, subscribeGroupRevisions, subscribeGroupInvitations, subscribeExpenseDecisions, subscribeExpenseCancellations, subscribePriorRevisionActivity, pendingOutbox, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
-import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION, KIND_GROUP_REVISION, KIND_GROUP_INVITATION, KIND_EXPENSE_DECISION, KIND_EXPENSE_CANCELLATION } from '../lib/constants'
+import { publishEvent, fetchProfile, fetchGroups, subscribeGroupRevisions, subscribeGroupInvitations, subscribeExpenseDecisions, subscribeExpenseCancellations, subscribePriorRevisionActivity, subscribeMemberExitRequests, pendingOutbox, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
+import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION, KIND_GROUP_REVISION, KIND_GROUP_INVITATION, KIND_EXPENSE_DECISION, KIND_EXPENSE_CANCELLATION, KIND_MEMBER_EXIT } from '../lib/constants'
 import { validPubkey } from '../lib/event-validation'
 import { groupAddress } from '../lib/group-history'
 import { parseGroupRevisionEvent, revisionTags, verifyGroupRevisionHistory, membersForRevisionEvent } from '../lib/group-revision-log'
@@ -12,6 +12,7 @@ import { isConfirmedSettlement } from '../lib/settlement-status'
 import { CONSENT_POLICY, invitationTags, parseInvitationDecisionEvent, invitationSummary, invitationReceiptTags, hasInvitationReceipts } from '../lib/group-invitations'
 import { EXPENSE_POLICY, expenseDecisionTags, parseExpenseDecisionEvent, expenseApprovalSummary, reconcileExpenseApprovals } from '../lib/expense-approvals'
 import { assertCanAddGroupMember } from '../lib/member-additions'
+import { memberExitTags, parseMemberExitRequestEvent, verifyMemberExitProofs, assertCanRequestExit, assertCanFinalizeExit } from '../lib/member-exits'
 import { expenseCancellationTags, parseExpenseCancellationEvent, expenseCancellationSummary } from '../lib/expense-cancellations'
 
 const randId = () => crypto.randomUUID()
@@ -125,6 +126,8 @@ export const useStore = create((set, get) => ({
           delete activeSubs['cancel_' + ref]
           activeSubs['prior_' + ref]?.()
           delete activeSubs['prior_' + ref]
+          activeSubs['leave_' + ref]?.()
+          delete activeSubs['leave_' + ref]
           activeSubs['rev_' + ref]?.()
           const head = live._revisionId
           const received = new Map()
@@ -143,6 +146,8 @@ export const useStore = create((set, get) => ({
                   const groups = s.groups.map(g => groupAddress(g) === ref
                     ? { ...g, _revisions: result.chain, _revisionStatus: 'verified',
                       _financialReviewRequired: result.removedMembers.length > 0,
+                      _memberExitRequests: [], _memberExitStatus: result.removedMembers.length ? 'pending' : 'none',
+                      _historicalActivityDetected: false,
                       _consentPolicy: result.consentPolicy, _inviteDecisions: [],
                       _inviteStatus: result.consentPolicy ? 'pending' : 'legacy',
                       _expensePolicy: result.expensePolicy, proposedExpenses: [],
@@ -154,6 +159,9 @@ export const useStore = create((set, get) => ({
                   return { groups }
                 })
               }
+              // Restore old-head exit evidence regardless of whether the
+              // removed member still appears in the current group definition.
+              get().watchMemberExits(ref)
               // Even a seemingly empty current ledger may hide historical
               // transactions: watch old heads independently of new consent.
               if (result.chain.length > 1 && !activeSubs['prior_' + ref]) {
@@ -161,7 +169,7 @@ export const useStore = create((set, get) => ({
                   if (currentSessionPubkey !== pubkey || get().getGroup(ref)?._revisionId !== head) return
                   set(s => {
                     const groups = s.groups.map(g => groupAddress(g) === ref
-                      ? { ...g, _financialReviewRequired: true,
+                      ? { ...g, _financialReviewRequired: true, _historicalActivityDetected: true,
                           _financialHistoryChecked: false,
                           expenses: [], settlements: [], confirmations: [] }
                       : g)
@@ -218,6 +226,58 @@ export const useStore = create((set, get) => ({
         })
       }
     )
+  },
+
+  // ─── SIGNED VOLUNTARY MEMBER EXITS ────────────────────────────────────────
+
+  watchMemberExits: (ref) => {
+    const group = get().getGroup(ref)
+    const account = get().pubkey
+    if (!group || !account || !group.members.includes(account) ||
+        group._revisionStatus !== 'verified' || !group._consentPolicy ||
+        activeSubs['leave_' + ref]) return
+    const revisionId = group._revisionId
+    activeSubs['leave_' + ref] = subscribeMemberExitRequests(group, parseMemberExitRequestEvent, request => {
+      if (get().pubkey !== account || currentSessionPubkey !== account ||
+          get().getGroup(ref)?._revisionId !== revisionId) return
+      get().applyMemberExitRequest(ref, request)
+    }, () => {})
+  },
+
+  applyMemberExitRequest: (ref, request) => {
+    const group = get().getGroup(ref)
+    if (!group || group._revisionStatus !== 'verified' ||
+        (group._memberExitRequests || []).some(r => r.id === request.id)) return
+    const requests = [...(group._memberExitRequests || []), request]
+    const verdict = verifyMemberExitProofs(group, requests)
+    const hasExit = group._revisions.some(r => !!r.exitedMember)
+    const canClear = hasExit && verdict === 'verified' && !group._historicalActivityDetected
+    set(s => {
+      const groups = s.groups.map(g => groupAddress(g) === ref
+        ? { ...g, _memberExitRequests: requests, _memberExitStatus: verdict,
+            _financialReviewRequired: canClear ? false :
+              verdict === 'conflict' ? true : g._financialReviewRequired,
+            ...(verdict === 'conflict' ?
+              { expenses: [], settlements: [], confirmations: [] } : {}) } : g)
+      saveGroups(get().pubkey, groups)
+      return { groups }
+    })
+    if (canClear && get().getGroup(ref)?._consentPolicy === CONSENT_POLICY) {
+      get().watchGroupInvitations(ref)
+    }
+  },
+
+  requestGroupExit: async (ref) => {
+    const group = get().getGroup(ref), account = get().pubkey
+    assertCanRequestExit(group, account, pendingOutbox(account))
+    const signed = await publishEvent(account, KIND_MEMBER_EXIT,
+      { groupId: group.id, revisionEventId: group._revisionId, action: 'leave' },
+      memberExitTags(group))
+    if (get().pubkey !== account || get().getGroup(ref)?._revisionId !== group._revisionId) return
+    const parsed = parseMemberExitRequestEvent(signed, group)
+    if (!parsed) throw new Error('Richiesta di uscita firmata non valida: controlla la outbox')
+    get().applyMemberExitRequest(ref, parsed)
+    return signed.id
   },
 
   // ─── SIGNED INVITATIONS ─────────────────────────────────────────────────────
@@ -520,6 +580,7 @@ export const useStore = create((set, get) => ({
     // echoed the group definition yet. Other accounts must still independently
     // reconstruct the signed immutable revision chain from relays.
     get().watchGroupInvitations(groupAddress(newGroup))
+    get().watchMemberExits(groupAddress(newGroup))
     members.forEach(m => get().fetchAndCacheProfile(m))
     return groupId
   },
@@ -575,7 +636,7 @@ export const useStore = create((set, get) => ({
       return { groups: next, toast: 'Membro aggiunto: in attesa di nuovi consensi Nostr' }
     })
     // Stop listeners for the old head and listen for fresh signed consents.
-    for (const kind of ['exp_', 'set_', 'conf_', 'approval_', 'cancel_', 'inv_', 'rev_', 'prior_']) {
+    for (const kind of ['exp_', 'set_', 'conf_', 'approval_', 'cancel_', 'inv_', 'rev_', 'prior_', 'leave_']) {
       activeSubs[kind + ref]?.()
       delete activeSubs[kind + ref]
     }
@@ -587,7 +648,7 @@ export const useStore = create((set, get) => ({
           if (get().pubkey !== account || get().getGroup(ref)?._revisionId !== signedRevision.id) return
           set(s => {
             const groups = s.groups.map(g => groupAddress(g) === ref
-              ? { ...g, _financialReviewRequired: true, _financialHistoryChecked: false,
+              ? { ...g, _financialReviewRequired: true, _historicalActivityDetected: true, _financialHistoryChecked: false,
                   expenses: [], settlements: [], confirmations: [] } : g)
             saveGroups(account, groups)
             return { groups }
@@ -595,8 +656,81 @@ export const useStore = create((set, get) => ({
         })
       }
       get().watchGroupInvitations(ref)
+      get().watchMemberExits(ref)
     }
     get().fetchAndCacheProfile(member)
+    return signedRevision.id
+  },
+
+  // ─── PHASE 2D-B: OWNER FINALIZES A VOLUNTARY EXIT ─────────────────────
+
+  finalizeGroupExit: async (ref, member) => {
+    const group = get().getGroup(ref), account = get().pubkey
+    const request = (group?._memberExitRequests || []).find(r => r.member === member &&
+      r.revisionEventId === group._revisionId)
+    const nextMembers = assertCanFinalizeExit(group, account, request, pendingOutbox(account))
+    const before = group._revisionId
+    const nextVersion = group._revisions.at(-1).version + 1
+    const signedRevision = await publishEvent(account, KIND_GROUP_REVISION,
+      { groupId: group.id, version: nextVersion, previousRevisionId: before,
+        members: nextMembers, exitedMember: member, exitProofEventId: request.id },
+      [...revisionTags(group, nextMembers, before), ['x', request.id]])
+    const parsed = parseGroupRevisionEvent(signedRevision, group)
+    if (!parsed) throw new Error('Revisione di uscita non valida: recupera soltanto la outbox')
+    const result = verifyGroupRevisionHistory(
+      { ...group, members: nextMembers, _revisionId: signedRevision.id },
+      [...group._revisions, parsed])
+    if (result.status !== 'verified' || result.removedMembers.length !== 1 ||
+        verifyMemberExitProofs({ ...group, members: nextMembers,
+          _revisionId: signedRevision.id, _revisions: result.chain },
+          group._memberExitRequests || []) !== 'verified') {
+      throw new Error('Uscita non verificabile: non firmare nuovi eventi')
+    }
+    if (get().pubkey !== account || get().getGroup(ref)?._revisionId !== before) {
+      throw new Error('Sessione o revisione cambiata: recupera la outbox')
+    }
+    const definition = await publishEvent(account, KIND_GROUP,
+      { id: group.id, name: group.name, members: nextMembers,
+        createdAt: group.createdAt, revisionEventId: signedRevision.id },
+      [['d', group.id], ['r', signedRevision.id], ['t', 'splitsats'],
+        ...nextMembers.map(m => ['p', m])])
+    if (get().pubkey !== account) return
+    const incoming = { ...group, members: nextMembers, _revisionId: signedRevision.id,
+      eventId: definition.id, _groupCreatedAt: definition.created_at }
+    set(s => {
+      const groups = mergeVerifiedGroup(s.groups, incoming).map(g =>
+        groupAddress(g) === ref && g.eventId === definition.id &&
+        g._revisionId === signedRevision.id
+          ? { ...g, _revisions: result.chain, _revisionStatus: 'verified',
+              _financialReviewRequired: false, _financialHistoryChecked: false,
+              _historicalActivityDetected: false,
+              _memberExitRequests: [...(group._memberExitRequests || [])],
+              _memberExitStatus: 'verified',
+              _consentPolicy: result.consentPolicy, _inviteDecisions: [],
+              _inviteStatus: 'pending', _expensePolicy: result.expensePolicy,
+              proposedExpenses: [], _expenseDecisions: [], _cancellationDecisions: [],
+              _expenseReviewRequired: false, expenses: [], settlements: [], confirmations: [] }
+          : g)
+      saveGroups(account, groups)
+      return { groups, toast: 'Uscita registrata: in attesa dei nuovi consensi' }
+    })
+    for (const prefix of ['exp_', 'set_', 'conf_', 'approval_', 'cancel_', 'inv_', 'rev_', 'prior_', 'leave_']) {
+      activeSubs[prefix + ref]?.()
+      delete activeSubs[prefix + ref]
+    }
+    delete subscribedMemberKeys[ref]
+    const current = get().getGroup(ref)
+    if (current?._revisionId === signedRevision.id) {
+      // Monitor old financial activity but never rewrite older signed events.
+      activeSubs['prior_' + ref] = subscribePriorRevisionActivity(current, result.chain, () => {
+        if (get().pubkey !== account || get().getGroup(ref)?._revisionId !== signedRevision.id) return
+        set(s => ({ groups: s.groups.map(g => groupAddress(g) === ref
+          ? { ...g, _financialReviewRequired: true, _historicalActivityDetected: true,
+              _financialHistoryChecked: false, expenses: [], settlements: [], confirmations: [] } : g) }))
+      })
+      get().watchMemberExits(ref)
+      get().watchGroupInvitations(ref)
+    }
     return signedRevision.id
   },
 

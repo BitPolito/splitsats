@@ -18,11 +18,13 @@ const statBox = (label, value, color) => (
   </div>
 )
 
-export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddExpense, onSettle, onConfirmSettlement, onInviteDecision, onExpenseDecision, onCancelExpense, onAddMember }) {
+export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddExpense, onSettle, onConfirmSettlement, onInviteDecision, onExpenseDecision, onCancelExpense, onAddMember, onRequestExit, onFinalizeExit }) {
   const [tab, setTab] = useState('expenses')
   const [confirmingId, setConfirmingId] = useState(null)
   const [confirmationError, setConfirmationError] = useState('')
   const [cancelBusy, setCancelBusy] = useState(null)
+  const [leaveBusy, setLeaveBusy] = useState(false)
+  const [leaveError, setLeaveError] = useState('')
   const [memberInput, setMemberInput] = useState('')
   const [memberBusy, setMemberBusy] = useState(false)
   const [memberError, setMemberError] = useState('')
@@ -298,6 +300,29 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
         {/* MEMBRI */}
         {tab === 'members' && <>
           <div style={{ fontFamily: 'var(--pixel)', fontSize: 8, color: 'var(--blue)', marginBottom: 4 }}>// membri del gruppo</div>
+          {leaveError && <div role="alert" style={{ color: 'var(--red)', fontFamily: 'var(--mono)', fontSize: 11 }}>{leaveError}</div>}
+          {group._consentPolicy === CONSENT_POLICY && members.length >= 3 && (
+            myPubkey !== group.pubkey ? (
+              <div style={{ fontFamily: 'var(--mono)', fontSize: 10 }}>
+                {(group._memberExitRequests || []).some(r => r.member === myPubkey && r.revisionEventId === group._revisionId)
+                  ? 'RICHIESTA USCITA INVIATA — ATTENDI LA CONFERMA DEL CREATORE'
+                  : <button disabled={leaveBusy || locked || !group._financialHistoryChecked} onClick={async () => {
+                      setLeaveBusy(true); setLeaveError('')
+                      try { await onRequestExit() } catch(e) { setLeaveError(e.message || 'Richiesta non riuscita') }
+                      finally { setLeaveBusy(false) }
+                    }}>RICHIEDI USCITA</button>}
+              </div>
+            ) : (group._memberExitRequests || []).filter(r => r.revisionEventId === group._revisionId).map(r =>
+              <div key={r.id} style={{ padding: 8, border: '1px solid var(--blue)', fontFamily: 'var(--mono)', fontSize: 10 }}>
+                USCITA RICHIESTA: {truncate(hexToNpub(r.member), 22)}
+                <button disabled={leaveBusy || locked || !group._financialHistoryChecked} onClick={async () => {
+                  setLeaveBusy(true); setLeaveError('')
+                  try { await onFinalizeExit(r.member) } catch(e) { setLeaveError(e.message || 'Uscita non riuscita') }
+                  finally { setLeaveBusy(false) }
+                }}>CONFERMA USCITA</button>
+              </div>
+            )
+          )}
           {myPubkey === group.pubkey && group._consentPolicy === CONSENT_POLICY && <div style={{ border: '2px solid var(--blue)', padding: 10, fontFamily: 'var(--mono)', fontSize: 10 }}>
             <div style={{ marginBottom: 8 }}>AGGIUNTA MEMBRI: disponibile solo nei gruppi senza spese, pagamenti o proposte. Tutti gli invitati dovranno accettare di nuovo la revisione firmata. Uscita e rimozione non sono ancora supportate.</div>
             <input aria-label="Nuovo membro Nostr" placeholder="npub1… o hex pubkey"

@@ -34,7 +34,11 @@ export function parseGroupRevisionEvent(event, group) {
       (content.consentPolicy !== undefined &&
         (content.version !== 0 || content.consentPolicy !== 'signed-invites-v1')) ||
       (content.expensePolicy !== undefined &&
-        (content.version !== 0 || content.expensePolicy !== EXPENSE_POLICY))) return null
+        (content.version !== 0 || content.expensePolicy !== EXPENSE_POLICY)) ||
+      ((content.exitedMember !== undefined || content.exitProofEventId !== undefined) &&
+        (content.version === 0 || !HASH.test(content.exitedMember || '') ||
+         !HASH.test(content.exitProofEventId || '') || content.exitedMember === group.pubkey ||
+         content.members.includes(content.exitedMember)))) return null
   const prev = content.previousRevisionId
   if ((content.version === 0 && prev !== null) ||
       (content.version > 0 && !HASH.test(prev || ''))) return null
@@ -43,18 +47,22 @@ export function parseGroupRevisionEvent(event, group) {
   const t = tagValues(event.tags, 't')
   const p = tagValues(event.tags, 'p')
   const e = tagValues(event.tags, 'e')
+  const x = tagValues(event.tags, 'x')
   if (!a || a.length !== 1 || a[0] !== address ||
       !g || g.length !== 1 || g[0] !== group.id ||
       !t || t.length !== 1 || t[0] !== 'splitsats' ||
       !p || p.length !== content.members.length || new Set(p).size !== p.length ||
       !p.every(member => content.members.includes(member)) ||
-      !e || (content.version === 0 ? e.length !== 0 : e.length !== 1 || e[0] !== prev)) return null
+      !e || (content.version === 0 ? e.length !== 0 : e.length !== 1 || e[0] !== prev) ||
+      !x || (content.exitProofEventId ? x.length !== 1 || x[0] !== content.exitProofEventId : x.length !== 0)) return null
   return {
     id: event.id, groupId: group.id, pubkey: event.pubkey,
     version: content.version, previousRevisionId: prev,
     members: [...content.members], createdAt: event.created_at,
     ...(content.consentPolicy ? { consentPolicy: content.consentPolicy } : {}),
     ...(content.expensePolicy ? { expensePolicy: content.expensePolicy } : {}),
+    ...(content.exitedMember ? { exitedMember: content.exitedMember,
+      exitProofEventId: content.exitProofEventId } : {}),
   }
 }
 
@@ -84,6 +92,10 @@ export function verifyGroupRevisionHistory(group, candidateRevisions) {
         !validMemberList(r.members) || !r.members.includes(group.pubkey) ||
         (r.consentPolicy != null && (r.version !== 0 || r.consentPolicy !== 'signed-invites-v1')) ||
         (r.expensePolicy != null && (r.version !== 0 || r.expensePolicy !== EXPENSE_POLICY)) ||
+        ((r.exitedMember !== undefined || r.exitProofEventId !== undefined) &&
+          (r.version === 0 || !HASH.test(r.exitedMember || '') ||
+           !HASH.test(r.exitProofEventId || '') || r.exitedMember === group.pubkey ||
+           r.members.includes(r.exitedMember))) ||
         !Number.isSafeInteger(r.createdAt) || r.createdAt <= 0 ||
         (r.version === 0 ? r.previousRevisionId !== null : !HASH.test(r.previousRevisionId || ''))) {
       return { status: 'conflict', chain: [] }
@@ -113,6 +125,26 @@ export function verifyGroupRevisionHistory(group, candidateRevisions) {
     return { status: 'conflict', chain: [] }
   if (!chain.length || chain[0].version !== 0 || chain.at(-1).id !== group._revisionId ||
       !sameMembers(chain.at(-1).members, group.members || [])) return { status: 'conflict', chain: [] }
+  // Existing legacy revision chains predate signed exit requests. They
+  // remain readable for audit; the caller MUST keep removedMembers locked
+  // for financial reconciliation. New consent-policy groups strictly require
+  // an exit proof in each owner-signed removal revision.
+  const requireExitProof = chain[0].consentPolicy === 'signed-invites-v1'
+  for (let i = 1; i < chain.length; i++) {
+    const before = chain[i - 1], after = chain[i]
+    const removed = before.members.filter(m => !after.members.includes(m))
+    const added = after.members.filter(m => !before.members.includes(m))
+    if (removed.length) {
+      if (requireExitProof &&
+          (removed.length !== 1 || added.length || removed[0] !== after.exitedMember ||
+           !HASH.test(after.exitProofEventId || ''))) {
+        return { status: 'conflict', chain: [] }
+      }
+      if (!requireExitProof && (after.exitedMember || after.exitProofEventId)) {
+        return { status: 'conflict', chain: [] }
+      }
+    } else if (after.exitedMember || after.exitProofEventId) return { status: 'conflict', chain: [] }
+  }
   const allMembers = [...new Set(chain.flatMap(r => r.members))]
   const removedMembers = allMembers.filter(member => !group.members.includes(member))
   return { status: 'verified', chain, allMembers, removedMembers,
