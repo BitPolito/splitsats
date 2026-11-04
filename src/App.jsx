@@ -8,6 +8,7 @@ import { CONSENT_POLICY, invitationSummary } from './lib/group-invitations'
 import LoginView   from './views/LoginView'
 import GroupsView  from './views/GroupsView'
 import GroupDetail from './views/GroupDetail'
+import FormerMemberAuditView from './views/FormerMemberAuditView'
 import ActivityView from './views/ActivityView'
 import ProfileView  from './views/ProfileView'
 
@@ -95,7 +96,7 @@ export default function App() {
 
   if (!pubkey) return <LoginView onLogin={login} loading={loading} />
 
-  const TABS = [['groups', 'GRUPPI'], ['activity', 'ATTIVITÀ'], ['profile', 'PROFILO']]
+  const TABS = [['groups', 'GRUPPI'], ['archive', 'ARCHIVIO'], ['activity', 'ATTIVITÀ'], ['profile', 'PROFILO']]
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', maxWidth: 520, margin: '0 auto', background: 'var(--bg)' }}>
@@ -185,6 +186,7 @@ export default function App() {
           </nav>
 
           {tab === 'groups'   && <GroupsView   groups={groups} myPubkey={pubkey} profiles={profiles} onSelectGroup={setSelectedGroup} onCreateGroup={() => setModal('createGroup')} />}
+          {tab === 'archive'  && <FormerMemberAuditView pubkey={pubkey} />}
           {tab === 'activity' && <ActivityView groups={groups} myPubkey={pubkey} profiles={profiles} />}
           {tab === 'profile'  && <ProfileView  myPubkey={pubkey} profiles={profiles} />}
         </>
