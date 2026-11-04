@@ -36,6 +36,7 @@ export default function App() {
   const requestGroupExit = useStore(s => s.requestGroupExit)
   const finalizeGroupExit = useStore(s => s.finalizeGroupExit)
   const cancelDisputedExpense = useStore(s => s.cancelDisputedExpense)
+  const attestHistoricalSnapshot = useStore(s => s.attestHistoricalSnapshot)
 
   // Revalidate the cached identity with the active NIP-07 signer before displaying data.
   useEffect(() => { restoreSession() }, [restoreSession])
@@ -164,6 +165,7 @@ export default function App() {
           onRequestExit={() => requestGroupExit(groupAddress(liveGroup))}
           onFinalizeExit={(member) => finalizeGroupExit(groupAddress(liveGroup), member)}
           onCancelExpense={(expenseEventId) => cancelDisputedExpense(groupAddress(liveGroup), expenseEventId)}
+          onAttestHistorical={() => attestHistoricalSnapshot(groupAddress(liveGroup))}
         />
       ) : (
         <>

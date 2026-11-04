@@ -9,6 +9,7 @@ import { EXPENSE_POLICY, expenseApprovalSummary } from '../lib/expense-approvals
 import { expenseCancellationSummary, cancellationParticipants } from '../lib/expense-cancellations'
 import { priorEvidenceCounts } from '../lib/prior-financial-evidence'
 import { replayHistoricalFinancialEvents } from '../lib/historical-financial-replay'
+import { historicalAttestationSummary } from '../lib/historical-attestations'
 
 const sats = (n) => Number(n).toLocaleString() + ' sat'
 const CATS = { food:'🍕', transport:'🚌', accommodation:'🏠', entertainment:'🎉', utilities:'⚡', other:'📦' }
@@ -20,12 +21,14 @@ const statBox = (label, value, color) => (
   </div>
 )
 
-export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddExpense, onSettle, onConfirmSettlement, onInviteDecision, onExpenseDecision, onCancelExpense, onAddMember, onRequestExit, onFinalizeExit }) {
+export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddExpense, onSettle, onConfirmSettlement, onInviteDecision, onExpenseDecision, onCancelExpense, onAddMember, onRequestExit, onFinalizeExit, onAttestHistorical }) {
   const [tab, setTab] = useState('expenses')
   const [confirmingId, setConfirmingId] = useState(null)
   const [confirmationError, setConfirmationError] = useState('')
   const [cancelBusy, setCancelBusy] = useState(null)
   const [leaveBusy, setLeaveBusy] = useState(false)
+  const [historyBusy, setHistoryBusy] = useState(false)
+  const [historyError, setHistoryError] = useState('')
   const [leaveError, setLeaveError] = useState('')
   const [memberInput, setMemberInput] = useState('')
   const [memberBusy, setMemberBusy] = useState(false)
@@ -124,6 +127,38 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
             </div>
           })()}
           <div>Questi dati sono prove Nostr, non debiti calcolati. Nessun pagamento automatico.</div>
+        </section>
+      )}
+      {group._historicalActivityDetected && (
+        <section role="status" style={{ padding: '10px 16px', borderBottom: '2px solid var(--blue)',
+          fontFamily: 'var(--mono)', fontSize: 10, lineHeight: 1.7 }}>
+          <strong>ATTESTAZIONI DELLO STORICO — NON AUTORIZZANO PAGAMENTI</strong>
+          {(() => {
+            const snapshot = group._historicalSnapshot
+            const summary = historicalAttestationSummary(group, snapshot, group._historicalAttestations || [])
+            const status = group._historicalAttestationConflict ? 'conflict' : summary.status
+            const maySign = snapshot && status === 'pending' && summary.pending.includes(myPubkey) &&
+              group.members?.includes(myPubkey) && group._priorHistoryChecked
+            return <>
+              <div>Stato: {status} · firme {summary.signed.length}/{summary.required.length}</div>
+              {snapshot && <div>Hash snapshot: {snapshot.hash.slice(0, 16)}… · eventi {snapshot.eventCount}</div>}
+              {!snapshot && <div>La ricostruzione osservata non e ancora attestabile.</div>}
+              {summary.pending.length > 0 && <div>Firme mancanti: {summary.pending.length}, inclusi eventuali ex partecipanti.</div>}
+              {status === 'attested' && <div>Tutti hanno firmato la stessa vista osservata. I pagamenti restano bloccati.</div>}
+              {status === 'conflict' && <div role="alert">Firme contraddittorie: revisione manuale obbligatoria.</div>}
+              {historyError && <div role="alert">{historyError}</div>}
+              {maySign && <button disabled={historyBusy} onClick={async () => {
+                setHistoryBusy(true); setHistoryError('')
+                try { await onAttestHistorical() }
+                catch (err) { setHistoryError(err.message || 'Firma dello storico non riuscita') }
+                finally { setHistoryBusy(false) }
+              }} style={{ padding: 8, marginTop: 8, fontFamily: 'var(--pixel)', fontSize: 7,
+                background: 'var(--blue)', color: '#fff', cursor: historyBusy ? 'wait' : 'pointer' }}>
+                {historyBusy ? 'FIRMA IN CORSO...' : 'ATTESTA LA RICOSTRUZIONE OSSERVATA'}
+              </button>}
+              <div>La firma attesta soltanto gli eventi e i saldi osservati, non la completezza dei relay ne il pagamento Lightning.</div>
+            </>
+          })()}
         </section>
       )}
       {group._consentPolicy === CONSENT_POLICY && (

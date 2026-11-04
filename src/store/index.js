@@ -1,8 +1,8 @@
 import { create } from 'zustand'
 import { saveGroups, loadProfiles, saveProfiles, loadPubkey, savePubkey, clearAll, clearPubkey } from '../lib/storage'
 import { verifyCachedSigner } from '../lib/session-identity'
-import { publishEvent, fetchProfile, fetchGroups, subscribeGroupRevisions, subscribeGroupInvitations, subscribeExpenseDecisions, subscribeExpenseCancellations, subscribePriorRevisionActivity, subscribeMemberExitRequests, pendingOutbox, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
-import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION, KIND_GROUP_REVISION, KIND_GROUP_INVITATION, KIND_EXPENSE_DECISION, KIND_EXPENSE_CANCELLATION, KIND_MEMBER_EXIT } from '../lib/constants'
+import { publishEvent, fetchProfile, fetchGroups, subscribeGroupRevisions, subscribeGroupInvitations, subscribeExpenseDecisions, subscribeExpenseCancellations, subscribePriorRevisionActivity, subscribeMemberExitRequests, subscribeHistoricalAttestations, pendingOutbox, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
+import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION, KIND_GROUP_REVISION, KIND_GROUP_INVITATION, KIND_EXPENSE_DECISION, KIND_EXPENSE_CANCELLATION, KIND_MEMBER_EXIT, KIND_HISTORICAL_ATTESTATION } from '../lib/constants'
 import { validPubkey } from '../lib/event-validation'
 import { groupAddress } from '../lib/group-history'
 import { parseGroupRevisionEvent, revisionTags, verifyGroupRevisionHistory, membersForRevisionEvent } from '../lib/group-revision-log'
@@ -14,7 +14,8 @@ import { EXPENSE_POLICY, expenseDecisionTags, parseExpenseDecisionEvent, expense
 import { assertCanAddGroupMember } from '../lib/member-additions'
 import { canResumeAfterPriorHistory } from '../lib/prior-history-gate'
 import { priorFinancialEvidence, appendPriorEvidence } from '../lib/prior-financial-evidence'
-import { appendHistoricalReplayEvent } from '../lib/historical-financial-replay'
+import { appendHistoricalReplayEvent, replayHistoricalFinancialEvents } from '../lib/historical-financial-replay'
+import { buildHistoricalAttestationSnapshot, parseHistoricalAttestationEvent, historicalAttestationTags, historicalAttestationSummary, MAX_HISTORICAL_ATTESTATIONS } from '../lib/historical-attestations'
 import { memberExitTags, parseMemberExitRequestEvent, verifyMemberExitProofs, assertCanRequestExit, assertCanFinalizeExit } from '../lib/member-exits'
 import { expenseCancellationTags, parseExpenseCancellationEvent, expenseCancellationSummary } from '../lib/expense-cancellations'
 
@@ -131,6 +132,8 @@ export const useStore = create((set, get) => ({
           delete activeSubs['prior_' + ref]
           activeSubs['leave_' + ref]?.()
           delete activeSubs['leave_' + ref]
+          activeSubs['historic_attest_' + ref]?.()
+          delete activeSubs['historic_attest_' + ref]
           activeSubs['rev_' + ref]?.()
           const head = live._revisionId
           const received = new Map()
@@ -152,6 +155,8 @@ export const useStore = create((set, get) => ({
                       _priorHistoryChecked: result.chain.length <= 1,
                       _priorFinancialEvidence: [], _priorEvidenceOverflow: false,
                       _priorReplayEvents: [], _priorReplayOverflow: false,
+                      _historicalSnapshot: null, _historicalAttestations: [],
+                      _historicalAttestationConflict: false,
                       _memberExitRequests: [], _memberExitStatus: result.removedMembers.length ? 'pending' : 'none',
                       _historicalActivityDetected: false,
                       _consentPolicy: result.consentPolicy, _inviteDecisions: [],
@@ -168,6 +173,7 @@ export const useStore = create((set, get) => ({
               // Restore old-head exit evidence regardless of whether the
               // removed member still appears in the current group definition.
               get().watchMemberExits(ref)
+              get().watchHistoricalAttestations(ref)
               // Even a seemingly empty current ledger may hide historical
               // transactions: watch old heads independently of new consent.
               if (result.chain.length > 1 && !activeSubs['prior_' + ref]) {
@@ -218,6 +224,93 @@ export const useStore = create((set, get) => ({
     )
   },
 
+  // ─── PHASE 2E-C-A: SIGNED HISTORICAL SNAPSHOT ATTESTATIONS ────────────────
+  watchHistoricalAttestations: (ref) => {
+    const group = get().getGroup(ref), account = get().pubkey
+    if (!account || !group?.members?.includes(account) ||
+        group._revisionStatus !== 'verified' ||
+        !Array.isArray(group._revisions) || group._revisions.length < 2 ||
+        activeSubs['historic_attest_' + ref]) return
+    const head = group._revisionId
+    activeSubs['historic_attest_' + ref] = subscribeHistoricalAttestations(group, row => {
+      if (get().pubkey !== account || currentSessionPubkey !== account ||
+          get().getGroup(ref)?._revisionId !== head) return
+      get().applyHistoricalAttestation(ref, row)
+    })
+  },
+
+  applyHistoricalAttestation: (ref, row) => {
+    const group = get().getGroup(ref)
+    if (!group || row?.revisionEventId !== group._revisionId) return
+    const account = get().pubkey
+    set(s => {
+      const groups = s.groups.map(g => {
+        if (groupAddress(g) !== ref || g._revisionId !== row.revisionEventId) return g
+        const previous = g._historicalAttestations || []
+        const known = previous.find(p => p.id === row.id)
+        if (known) return JSON.stringify(known) === JSON.stringify(row) ? g :
+          { ...g, _historicalAttestationConflict: true }
+        if (previous.length >= MAX_HISTORICAL_ATTESTATIONS) {
+          return { ...g, _historicalAttestationConflict: true }
+        }
+        return { ...g, _historicalAttestations: [...previous, row] }
+      })
+      saveGroups(account, groups)
+      return { groups }
+    })
+  },
+
+  refreshHistoricalSnapshot: async (ref) => {
+    const account = get().pubkey, group = get().getGroup(ref)
+    if (!account || !group || !group._priorHistoryChecked ||
+        !group._historicalActivityDetected || group._revisionStatus !== 'verified') return
+    const head = group._revisionId, events = group._priorReplayEvents || []
+    const replay = replayHistoricalFinancialEvents(group, events,
+      { overflow: !!group._priorReplayOverflow })
+    const snapshot = await buildHistoricalAttestationSnapshot(group, events, replay)
+    const current = get().getGroup(ref)
+    if (get().pubkey !== account || currentSessionPubkey !== account ||
+        current?._revisionId !== head || current._priorReplayEvents !== events ||
+        !current._priorHistoryChecked || current._priorReplayOverflow) return
+    set(s => {
+      const groups = s.groups.map(g => groupAddress(g) === ref && g._revisionId === head
+        ? { ...g, _historicalSnapshot: snapshot } : g)
+      saveGroups(account, groups)
+      return { groups }
+    })
+  },
+
+  attestHistoricalSnapshot: async (ref) => {
+    const account = get().pubkey, group = get().getGroup(ref)
+    if (!account || !group?.members?.includes(account) ||
+        group._revisionStatus !== 'verified' || !group._priorHistoryChecked ||
+        !group._historicalActivityDetected || group._priorReplayOverflow ||
+        pendingOutbox(account).length) {
+      throw new Error('Snapshot non verificato, firma non consentita o outbox pendente')
+    }
+    const events = group._priorReplayEvents || []
+    const replay = replayHistoricalFinancialEvents(group, events,
+      { overflow: !!group._priorReplayOverflow })
+    const snapshot = await buildHistoricalAttestationSnapshot(group, events, replay)
+    if (!snapshot || snapshot.hash !== group._historicalSnapshot?.hash ||
+        get().pubkey !== account || get().getGroup(ref)?._revisionId !== group._revisionId ||
+        get().getGroup(ref)?._priorReplayEvents !== events) {
+      throw new Error('Snapshot variato o incompleto: aggiorna la ricostruzione prima di firmare')
+    }
+    const summary = historicalAttestationSummary(group, snapshot, group._historicalAttestations || [])
+    if (group._historicalAttestationConflict || summary.status !== 'pending' ||
+        !summary.pending.includes(account)) throw new Error('Attestazione gia presente o in conflitto')
+    const signed = await publishEvent(account, KIND_HISTORICAL_ATTESTATION,
+      { version: 1, action: 'attest-historical-v1', groupId: group.id,
+        revisionEventId: group._revisionId, snapshotHash: snapshot.hash },
+      historicalAttestationTags(group, snapshot))
+    if (get().pubkey !== account || get().getGroup(ref)?._revisionId !== group._revisionId) return
+    const parsed = parseHistoricalAttestationEvent(signed, group)
+    if (!parsed) throw new Error('Firma storica non valida: recupera soltanto la outbox')
+    get().applyHistoricalAttestation(ref, parsed)
+    return signed.id
+  },
+
   // ─── PHASE 2E-A: READ-ONLY OLD-HEAD FINANCIAL EVIDENCE ────────────────────
   recordPriorFinancialEvidence: (ref, head, event) => {
     const account = get().pubkey
@@ -257,6 +350,7 @@ export const useStore = create((set, get) => ({
       delete activeSubs[prefix + ref]
     }
     delete subscribedMemberKeys[ref]
+    void get().refreshHistoricalSnapshot(ref)
   },
 
   // ─── PRIOR-REVISION FINANCIAL SAFETY BARRIER ─────────────────────────────
@@ -271,6 +365,7 @@ export const useStore = create((set, get) => ({
       return { groups }
     })
     get().refreshPriorHistoryGate(ref)
+    void get().refreshHistoricalSnapshot(ref)
   },
 
   refreshPriorHistoryGate: (ref) => {
@@ -692,6 +787,8 @@ export const useStore = create((set, get) => ({
               _priorHistoryChecked: false,
               _priorFinancialEvidence: [], _priorEvidenceOverflow: false,
               _priorReplayEvents: [], _priorReplayOverflow: false,
+              _historicalSnapshot: null, _historicalAttestations: [],
+              _historicalAttestationConflict: false,
               _consentPolicy: chainResult.consentPolicy, _inviteDecisions: [],
               _inviteStatus: 'pending', _expensePolicy: chainResult.expensePolicy,
               proposedExpenses: [], _expenseDecisions: [], _cancellationDecisions: [],
@@ -701,7 +798,7 @@ export const useStore = create((set, get) => ({
       return { groups: next, toast: 'Membro aggiunto: in attesa di nuovi consensi Nostr' }
     })
     // Stop listeners for the old head and listen for fresh signed consents.
-    for (const kind of ['exp_', 'set_', 'conf_', 'approval_', 'cancel_', 'inv_', 'rev_', 'prior_', 'leave_']) {
+    for (const kind of ['exp_', 'set_', 'conf_', 'approval_', 'cancel_', 'inv_', 'rev_', 'prior_', 'leave_', 'historic_attest_']) {
       activeSubs[kind + ref]?.()
       delete activeSubs[kind + ref]
     }
@@ -713,6 +810,7 @@ export const useStore = create((set, get) => ({
       }
       get().watchGroupInvitations(ref)
       get().watchMemberExits(ref)
+      get().watchHistoricalAttestations(ref)
     }
     get().fetchAndCacheProfile(member)
     return signedRevision.id
@@ -762,6 +860,8 @@ export const useStore = create((set, get) => ({
               _priorHistoryChecked: false, _historicalActivityDetected: false,
               _priorFinancialEvidence: [], _priorEvidenceOverflow: false,
               _priorReplayEvents: [], _priorReplayOverflow: false,
+              _historicalSnapshot: null, _historicalAttestations: [],
+              _historicalAttestationConflict: false,
               _memberExitRequests: [...(group._memberExitRequests || [])],
               _memberExitStatus: 'verified',
               _consentPolicy: result.consentPolicy, _inviteDecisions: [],
@@ -772,7 +872,7 @@ export const useStore = create((set, get) => ({
       saveGroups(account, groups)
       return { groups, toast: 'Uscita registrata: in attesa dei nuovi consensi' }
     })
-    for (const prefix of ['exp_', 'set_', 'conf_', 'approval_', 'cancel_', 'inv_', 'rev_', 'prior_', 'leave_']) {
+    for (const prefix of ['exp_', 'set_', 'conf_', 'approval_', 'cancel_', 'inv_', 'rev_', 'prior_', 'leave_', 'historic_attest_']) {
       activeSubs[prefix + ref]?.()
       delete activeSubs[prefix + ref]
     }
@@ -782,6 +882,7 @@ export const useStore = create((set, get) => ({
       // Monitor old financial activity but never rewrite older signed events.
       activeSubs['prior_' + ref] = subscribePriorRevisionActivity(current, result.chain, event => get().recordPriorFinancialEvidence(ref, signedRevision.id, event), () => get().completePriorHistory(ref, signedRevision.id))
       get().watchMemberExits(ref)
+      get().watchHistoricalAttestations(ref)
       get().watchGroupInvitations(ref)
     }
     return signedRevision.id
