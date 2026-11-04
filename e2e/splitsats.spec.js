@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import { finalizeEvent } from 'nostr-tools'
 import { MemoryNostrRelay, openSignedClient, testSigner } from './relay-harness.js'
 
 async function login(page) {
@@ -104,5 +105,61 @@ test('two signed clients: group, expense, debtor claim, recipient approval, refr
     }
   } finally {
     await Promise.allSettled([a.context.close(), b.context.close()])
+  }
+})
+
+
+test('same d-tag by two authors cannot merge balances or claim unscoped legacy events', async ({ browser }) => {
+  const relay = new MemoryNostrRelay()
+  const a = testSigner(31)
+  const b = testSigner(32)
+  const viewer = testSigner(33)
+  const id = 'same-d-test'
+  const members = [a.pubkey, b.pubkey, viewer.pubkey]
+  const createdAt = Math.floor(Date.now() / 1000) - 60
+  const sign = (identity, kind, tags, content) => finalizeEvent({
+    kind, created_at: createdAt, tags, content: JSON.stringify(content),
+  }, identity.secret)
+  const signedGroup = (identity, name) => sign(identity, 30001,
+    [['d', id], ['t', 'splitsats'], ...members.map(pk => ['p', pk])],
+    { id, name, members, createdAt })
+  const expense = (identity, amount, name, scoped) => sign(identity, 9000,
+    [['g', id], ...(scoped ? [['a', `30001:${identity.pubkey}:${id}`]] : []),
+      ['t', 'splitsats'], ...members.map(pk => ['p', pk])],
+    { id: name, description: name, amount, paidBy: identity.pubkey,
+      splits: [identity.pubkey, viewer.pubkey], category: 'food', createdAt })
+  const events = [
+    signedGroup(a, 'Colliding Alpha'),
+    expense(a, 900, 'Legacy ambiguous', false),
+    signedGroup(b, 'Colliding Beta'),
+    expense(a, 400, 'Scoped Alpha', true),
+    expense(b, 700, 'Scoped Beta', true),
+  ]
+  for (const event of events) relay.events.set(event.id, event)
+  const client = await openSignedClient(browser, relay, viewer)
+  try {
+    await login(client.page)
+    await expect(client.page.getByText('Colliding Alpha', { exact: true })).toBeVisible()
+    await expect(client.page.getByText('Colliding Beta', { exact: true })).toBeVisible()
+    await client.page.getByText('Colliding Alpha', { exact: true }).click()
+    await expect(client.page.getByText('Scoped Alpha', { exact: true })).toBeVisible()
+    await expect(client.page.getByText('Legacy ambiguous', { exact: true })).toHaveCount(0)
+    await expect(client.page.getByText('TOTALE').locator('..')).toContainText('400 sat')
+    await client.page.getByRole('button', { name: '← BACK' }).click()
+    await client.page.getByText('Colliding Beta', { exact: true }).click()
+    await expect(client.page.getByText('Scoped Beta', { exact: true })).toBeVisible()
+    await expect(client.page.getByText('Scoped Alpha', { exact: true })).toHaveCount(0)
+    await expect(client.page.getByText('Legacy ambiguous', { exact: true })).toHaveCount(0)
+    await expect(client.page.getByText('TOTALE').locator('..')).toContainText('700 sat')
+    await expect(client.page.getByRole('alert')).toContainText('vecchie transazioni')
+    // No trusted local snapshot is required: after reload signed relay events
+    // reconstruct both owner-scoped groups without mixing their balances.
+    await client.page.reload()
+    await expect(client.page.getByText('Colliding Alpha', { exact: true })).toBeVisible()
+    await expect(client.page.getByText('Colliding Beta', { exact: true })).toBeVisible()
+    await client.page.getByText('Colliding Alpha', { exact: true }).click()
+    await expect(client.page.getByText('TOTALE').locator('..')).toContainText('400 sat')
+  } finally {
+    await client.context.close()
   }
 })

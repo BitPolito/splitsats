@@ -55,6 +55,12 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
         </div>
       </div>
 
+      {group._legacyQuarantined && (
+        <div role="alert" style={{ padding: '10px 16px', borderBottom: '2px solid var(--red)', color: 'var(--red)', background: 'var(--surface)', fontFamily: 'var(--mono)', fontSize: 11 }}>
+          Gruppi con lo stesso ID ma autori diversi: le vecchie transazioni prive del riferimento `a` sono state escluse dai saldi. Verifica lo storico prima di effettuare pagamenti.
+        </div>
+      )}
+
       {/* Sub-nav */}
       <nav style={{ display: 'flex', background: 'var(--surface)', borderBottom: '2px solid var(--blue)' }}>
         {SUBTABS.map(([key, label], i) => (

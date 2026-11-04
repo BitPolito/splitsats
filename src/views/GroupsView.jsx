@@ -1,4 +1,5 @@
 import { simplifyDebts } from '../lib/balances'
+import { groupAddress } from '../lib/group-history'
 import { approvedSettlements } from '../lib/settlement-status'
 import { Avatar, SectionHeader, Button, Empty } from '../components/ui'
 
@@ -32,7 +33,7 @@ export default function GroupsView({ groups, myPubkey, profiles, onSelectGroup, 
 
         return (
           <div
-            key={g.id}
+            key={groupAddress(g)}
             onClick={() => onSelectGroup(g)}
             style={{
               background: 'var(--surface)', border: '2px solid var(--blue)',
@@ -49,6 +50,11 @@ export default function GroupsView({ groups, myPubkey, profiles, onSelectGroup, 
                 <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text3)' }}>
                   {(g.members || []).length} MEMBRI · {(g.expenses || []).length} SPESE
                 </div>
+                {groups.some(other => other !== g && other.id === g.id) && (
+                  <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--text3)', marginTop: 5 }}>
+                    AUTORE: {g.pubkey.slice(0, 12)}…
+                  </div>
+                )}
               </div>
               <div style={{
                 fontFamily: 'var(--pixel)', fontSize: 9, fontWeight: 700,
