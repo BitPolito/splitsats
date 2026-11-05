@@ -12,6 +12,7 @@ import { replayHistoricalFinancialEvents } from '../lib/historical-financial-rep
 import { historicalAttestationSummary } from '../lib/historical-attestations'
 import RelaySnapshotDiagnostics from '../components/RelaySnapshotDiagnostics'
 import HistoricalReconciliationPanel from '../components/HistoricalReconciliationPanel'
+import HistoricalDispositionReview from '../components/HistoricalDispositionReview'
 
 const sats = (n) => Number(n).toLocaleString() + ' sat'
 const CATS = { food:'🍕', transport:'🚌', accommodation:'🏠', entertainment:'🎉', utilities:'⚡', other:'📦' }
@@ -181,6 +182,16 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
             catch (e) { setReconError(e.message || 'Errore durante la firma') }
             finally { reconSigning.current = false; setReconBusy(false) }
           }} />
+      </section>}
+      {group._historicalActivityDetected && <section style={{ padding: '10px 16px',
+        borderBottom: '2px solid var(--blue)' }}>
+        <HistoricalDispositionReview group={group}
+          snapshot={group._historicalSnapshot}
+          checkpoint={group._reconciliationCheckpoint}
+          rows={group._reconciliationRows || []}
+          sourceAudit={group._priorRelayAudit}
+          decisionAudit={group._reconciliationDecisionAudit}
+          conflict={!!group._reconciliationConflict} account={myPubkey} />
       </section>}
       {group._priorRelayAudit && (group._revisions || []).length > 1 && (
         <section role="status" style={{ padding: '10px 16px', borderBottom: '2px solid var(--blue)',
