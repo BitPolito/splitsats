@@ -53,6 +53,7 @@ export function mergeVerifiedGroup(groups, incoming) {
       _priorEvidenceOverflow: revisionChanged ? false : !!existing._priorEvidenceOverflow,
       _priorReplayEvents: revisionChanged ? [] : existing._priorReplayEvents || [],
       _priorReplayOverflow: revisionChanged ? false : !!existing._priorReplayOverflow,
+      _priorRelayAudit: revisionChanged ? null : existing._priorRelayAudit || null,
       _historicalSnapshot: revisionChanged ? null : existing._historicalSnapshot || null,
       _historicalAttestations: revisionChanged ? [] : existing._historicalAttestations || [],
       _historicalAttestationConflict: revisionChanged ? false : !!existing._historicalAttestationConflict }
@@ -63,6 +64,7 @@ export function mergeVerifiedGroup(groups, incoming) {
       _priorHistoryChecked: false,
       _priorFinancialEvidence: [], _priorEvidenceOverflow: false,
       _priorReplayEvents: [], _priorReplayOverflow: false,
+      _priorRelayAudit: null,
       _historicalSnapshot: null, _historicalAttestations: [],
       _historicalAttestationConflict: false,
       _memberExitRequests: [], _memberExitStatus: 'none', _historicalActivityDetected: false,
