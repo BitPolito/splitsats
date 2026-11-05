@@ -16,6 +16,8 @@ import { parseExpenseCancellationEvent } from './expense-cancellations'
 import { parseFormerMemberExitHint } from './former-member-audit'
 import { KIND_HISTORICAL_ATTESTATION } from './constants'
 import { parseHistoricalAttestationEvent, historicalAttestationParticipants } from './historical-attestations'
+import { KIND_HISTORICAL_RECONCILIATION } from './constants'
+import { parseHistoricalReconciliationEvent } from './historical-reconciliation'
 
 // ─── npub ↔ hex conversion ────────────────────────────────────────────────────
 // Nostr relays always use hex pubkeys. npub is only a display format.
@@ -292,6 +294,32 @@ export function subscribeHistoricalAttestations(group, onAttestation) {
     onEvent: event => {
       const row = parseHistoricalAttestationEvent(event, group)
       if (row) onAttestation(row)
+    },
+  })
+}
+
+// Independent signatures on an explicit proposed historical net vector.
+// Subscription input is crypto signature-verified by RelayPool.
+export function subscribeHistoricalReconciliations(group, onReconciliation, onSynced) {
+  const address = groupAddress(group)
+  const authors = historicalAttestationParticipants(group)
+  if (!address || !authors) throw new Error('Revisioni storiche non verificate')
+  const eoses = new Set()
+  return pool.subscribe({
+    id: 'historic_recon_' + address,
+    filters: [{ kinds: [KIND_HISTORICAL_RECONCILIATION], authors,
+      '#a': [address], '#g': [group.id], '#r': [group._revisionId], limit: 300 }],
+    onEvent: event => {
+      const row = parseHistoricalReconciliationEvent(event, group)
+      if (row) onReconciliation(row)
+    },
+    onRelayEose: relay => {
+      eoses.add(relay)
+      onSynced?.(eoses.size === RELAYS.length)
+    },
+    onRelayReset: relay => {
+      eoses.delete(relay)
+      onSynced?.(false)
     },
   })
 }
