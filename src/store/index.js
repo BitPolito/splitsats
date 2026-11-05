@@ -168,6 +168,7 @@ export const useStore = create((set, get) => ({
                       _historicalAttestationConflict: false,
                       _reconciliationCheckpoint: null, _reconciliationRows: [],
                       _reconciliationConflict: false, _reconciliationDecisionsChecked: false,
+                      _reconciliationDecisionAudit: null,
                       _memberExitRequests: [], _memberExitStatus: result.removedMembers.length ? 'pending' : 'none',
                       _historicalActivityDetected: false,
                       _consentPolicy: result.consentPolicy, _inviteDecisions: [],
@@ -262,11 +263,12 @@ export const useStore = create((set, get) => ({
       if (get().pubkey !== account || currentSessionPubkey !== account ||
           get().getGroup(ref)?._revisionId !== head) return
       get().applyHistoricalReconciliation(ref, row)
-    }, ready => {
+    }, (ready, decisionAudit) => {
       if (get().pubkey !== account || currentSessionPubkey !== account ||
           get().getGroup(ref)?._revisionId !== head) return
       set(s => ({ groups: s.groups.map(g => groupAddress(g) === ref && g._revisionId === head
         ? { ...g, _reconciliationDecisionsChecked: ready,
+            _reconciliationDecisionAudit: decisionAudit,
             ...(ready ? {} : { _reconciliationCheckpoint: null }) } : g) }))
       if (ready) void get().refreshReconciliationCheckpoint(ref)
     })
