@@ -47,7 +47,7 @@ export default function FormerMemberAuditView({ pubkey }) {
     let newest = null
     const runtime = { account: pubkey, group: null, events: [], attestations: [],
       snapshot: null, overflow: false, financial: false, eligible: false,
-      priorEvidenceOverflow: false, evidence: [], historyChecked: false, version: 0 }
+      priorEvidenceOverflow: false, evidence: [], historyChecked: false, version: 0, relayAudit: null }
     active.current = runtime
     setReport(null); setError(''); setStatus('Recupero definizione del gruppo firmata dal proprietario…')
 
@@ -60,6 +60,7 @@ export default function FormerMemberAuditView({ pubkey }) {
       if (closed) return
       setStatus(phase)
       setReport({ group: runtime.group, eligible: runtime.eligible, snapshot: runtime.snapshot,
+        relayAudit: runtime.relayAudit,
         replay: runtime.replay, summary: runtime.group && runtime.snapshot
           ? historicalAttestationSummary(runtime.group, runtime.snapshot, runtime.attestations)
           : null, eventCount: runtime.events.length, ...extra })
@@ -91,7 +92,7 @@ export default function FormerMemberAuditView({ pubkey }) {
       stopInner()
       Object.assign(runtime, { group: null, events: [], attestations: [],
         snapshot: null, overflow: false, financial: false, eligible: false,
-        priorEvidenceOverflow: false, evidence: [], historyChecked: false, version: 0, replay: null })
+        priorEvidenceOverflow: false, evidence: [], historyChecked: false, version: 0, replay: null, relayAudit: null })
       show('Verifica delle revisioni firmate dal creatore…')
       const known = new Map()
       inner.push(subscribeGroupRevisions(group, rev => {
@@ -147,6 +148,10 @@ export default function FormerMemberAuditView({ pubkey }) {
             if (!alive(version)) return
             runtime.historyChecked = true
             void reconstruct(version)
+          }, diagnostic => {
+            if (!alive(version)) return
+            runtime.relayAudit = diagnostic
+            setReport(old => old ? { ...old, relayAudit: diagnostic } : old)
           }))
         }))
       }))
@@ -209,6 +214,10 @@ export default function FormerMemberAuditView({ pubkey }) {
       <div role="status">{status}</div>
       {report?.eligible && <div>ACCESSO ARCHIVIO VERIFICATO — SOLA LETTURA</div>}
       {report?.replay && <div>Ricostruzione: {report.replay.status} · eventi osservati {report.eventCount}</div>}
+      {report?.relayAudit && <div role="status">
+        Confronto relay: {report.relayAudit.status} · EOSE {report.relayAudit.completedRelays}/{report.relayAudit.configuredRelays}.
+        Nessuna prova di completezza, nessuno sblocco dei pagamenti.
+      </div>}
       {report?.snapshot && <>
         <div>Hash osservato: <code>{report.snapshot.hash}</code></div>
         <div>Firme: {report.summary?.signed.length || 0}/{report.summary?.required.length || 0}

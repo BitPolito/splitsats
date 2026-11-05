@@ -2,6 +2,7 @@ import { verifyEvent } from 'nostr-tools'
 import { nip19 } from 'nostr-tools'
 import { RELAYS } from './constants'
 import { RelayPool } from './relay-pool'
+import { RelaySnapshotAudit } from './relay-snapshot-audit'
 import { outbox, replayStoredEvents } from './outbox'
 import { parseGroupEvent, parseExpenseEvent, parseSettlementEvent, parseConfirmationEvent } from './event-validation'
 import { groupAddress } from './group-history'
@@ -246,19 +247,35 @@ export function subscribeExpenseCancellations(group, onCancellation, onEose) {
 // Historical signed activity after a membership change requires an explicit
 // financial reconciliation. The current consent protocol cannot yet replay
 // old-head payment approvals against a new-head roster.
-export function subscribePriorRevisionActivity(group, chain, onActivity, onEose) {
+export function subscribePriorRevisionActivity(group, chain, onActivity, onEose, onAudit) {
   const address = groupAddress(group)
   const old = chain.slice(0, -1)
   const authors = [...new Set(old.flatMap(r => r.members))]
   if (!address || !old.length || !authors.length) throw new Error('Storico revisioni non valido')
-  return pool.subscribe({
+  // Optional audit callbacks do NOT affect financial locking or legacy EOSE.
+  const audit = typeof onAudit === 'function' ? new RelaySnapshotAudit(RELAYS) : null
+  const notify = () => { if (audit) onAudit(audit.report()) }
+  const unsubscribe = pool.subscribe({
     id: 'prior_finance_' + address,
     filters: [{ kinds: [KIND_GROUP_INVITATION, 9000, 9001, 9002, KIND_EXPENSE_DECISION, KIND_EXPENSE_CANCELLATION],
       authors, '#a': [address], '#g': [group.id],
       '#r': old.map(r => r.id), limit: 500 }],
     onEvent: onActivity,
     onEose,
+    onRelayEvent: audit ? (event, relay) => {
+      const row = audit.relays.get(relay)
+      const wasRisk = !!(row?.late || row?.conflict || row?.overflow || row?.saturated)
+      audit.record(relay, event)
+      const isRisk = !!(row?.late || row?.conflict || row?.overflow || row?.saturated)
+      // Avoid thousands of React/local-cache writes during initial replay.
+      // Counts are published at each source EOSE; risk transitions immediately.
+      if (!wasRisk && isRisk) notify()
+    } : undefined,
+    onRelayEose: audit ? relay => { audit.eose(relay); notify() } : undefined,
+    onRelayReset: audit ? (relay, reason) => { audit.reset(relay, reason); notify() } : undefined,
   })
+  if (audit) notify()
+  return unsubscribe
 }
 
 // A signed statement is bound to the exact active revision; verifyEvent

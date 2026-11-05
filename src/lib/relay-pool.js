@@ -39,6 +39,9 @@ export class RelayPool {
       if (this._stopped || this._sockets[url] !== ws) return
       this._retries[url] = 0
       for (const [id, sub] of Object.entries(this._subs)) {
+        // A reconnected relay begins a NEW observation epoch. This never
+        // changes the existing first-EOSE application behavior.
+        try { sub.onRelayReset?.(url, 'connected') } catch {}
         this._sendTo(ws, ['REQ', id, ...sub.filters])
       }
       // Retry the *same signed ID* after reconnect, never sign a new event.
@@ -66,17 +69,26 @@ export class RelayPool {
         const [, subId, event] = msg
         if (!event?.id || !this._subs[subId]) return
         const key = `${subId}:${event.id}`
-        if (this._seen.has(key)) return
+        // Cryptographic signature validation precedes BOTH callbacks.
         try { if (!this._verifyEvent(event)) return } catch { return }
+        // Audit every relay separately, even when the application has already
+        // deduplicated this signed ID from a different relay.
+        try { this._subs[subId]?.onRelayEvent?.(event, url) } catch {}
+        if (this._seen.has(key)) return
         this._seen.add(key)
         this._subs[subId]?.onEvent(event)
       } else if (msg[0] === 'EOSE') {
         const sub = this._subs[msg[1]]
         // The first responding relay completes the initial load. Other relays
         // keep streaming later events, even if one relay is offline.
-        if (sub && !sub.didEose) {
-          sub.didEose = true
-          sub.onEose?.()
+        if (sub) {
+          // Every source gets its own EOSE callback, independent of the
+          // legacy app callback which still fires on the FIRST relay only.
+          try { sub.onRelayEose?.(url) } catch {}
+          if (!sub.didEose) {
+            sub.didEose = true
+            sub.onEose?.()
+          }
         }
       }
     }
@@ -84,6 +96,9 @@ export class RelayPool {
     ws.onclose = () => {
       if (this._stopped || this._sockets[url] !== ws) return
       delete this._sockets[url]
+      for (const sub of Object.values(this._subs)) {
+        try { sub.onRelayReset?.(url, 'disconnected') } catch {}
+      }
       this._scheduleReconnect(url)
     }
   }
@@ -137,10 +152,10 @@ export class RelayPool {
     else entry.resolve(result)
   }
 
-  subscribe({ id, filters, onEvent, onEose }) {
+  subscribe({ id, filters, onEvent, onEose, onRelayEvent, onRelayEose, onRelayReset }) {
     const subId = id || Math.random().toString(36).slice(2)
     if (this._subs[subId]) this.unsubscribe(subId)
-    this._subs[subId] = { filters, onEvent, onEose, didEose: false }
+    this._subs[subId] = { filters, onEvent, onEose, onRelayEvent, onRelayEose, onRelayReset, didEose: false }
     this._broadcast(['REQ', subId, ...filters])
     return () => this.unsubscribe(subId)
   }
