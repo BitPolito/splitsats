@@ -1,8 +1,8 @@
 import { create } from 'zustand'
 import { saveGroups, loadProfiles, saveProfiles, loadPubkey, savePubkey, clearAll, clearPubkey } from '../lib/storage'
 import { verifyCachedSigner } from '../lib/session-identity'
-import { publishEvent, fetchProfile, fetchGroups, subscribeGroupRevisions, subscribeGroupInvitations, subscribeExpenseDecisions, subscribeExpenseCancellations, subscribePriorRevisionActivity, subscribeMemberExitRequests, subscribeHistoricalAttestations, subscribeHistoricalReconciliations, pendingOutbox, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
-import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION, KIND_GROUP_REVISION, KIND_GROUP_INVITATION, KIND_EXPENSE_DECISION, KIND_EXPENSE_CANCELLATION, KIND_MEMBER_EXIT, KIND_HISTORICAL_ATTESTATION, KIND_HISTORICAL_RECONCILIATION } from '../lib/constants'
+import { publishEvent, fetchProfile, fetchGroups, subscribeGroupRevisions, subscribeGroupInvitations, subscribeExpenseDecisions, subscribeExpenseCancellations, subscribePriorRevisionActivity, subscribeMemberExitRequests, subscribeHistoricalAttestations, subscribeHistoricalReconciliations, subscribeHistoricalDispositionIntents, pendingOutbox, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
+import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION, KIND_GROUP_REVISION, KIND_GROUP_INVITATION, KIND_EXPENSE_DECISION, KIND_EXPENSE_CANCELLATION, KIND_MEMBER_EXIT, KIND_HISTORICAL_ATTESTATION, KIND_HISTORICAL_RECONCILIATION, KIND_HISTORICAL_DISPOSITION_INTENT } from '../lib/constants'
 import { validPubkey } from '../lib/event-validation'
 import { groupAddress } from '../lib/group-history'
 import { parseGroupRevisionEvent, revisionTags, verifyGroupRevisionHistory, membersForRevisionEvent } from '../lib/group-revision-log'
@@ -21,6 +21,8 @@ import {
   historicalReconciliationTags, historicalReconciliationSummary,
   MAX_HISTORICAL_RECONCILIATIONS,
 } from '../lib/historical-reconciliation'
+import { buildHistoricalDispositionDrafts } from '../lib/historical-disposition'
+import { historicalDispositionIntentTags, parseHistoricalDispositionIntentEvent, historicalDispositionIntentSummary, historicalDispositionIntentReady, MAX_HISTORICAL_DISPOSITION_INTENTS } from '../lib/historical-disposition-intents'
 import { memberExitTags, parseMemberExitRequestEvent, verifyMemberExitProofs, assertCanRequestExit, assertCanFinalizeExit } from '../lib/member-exits'
 import { expenseCancellationTags, parseExpenseCancellationEvent, expenseCancellationSummary } from '../lib/expense-cancellations'
 
@@ -30,6 +32,7 @@ const now    = () => Math.floor(Date.now() / 1000)
 const activeSubs = {}
 const subscribedMemberKeys = {}
 const inFlightReconciliations = new Set()
+const inFlightDispositionIntents = new Set()
 let currentSessionPubkey = null
 
 function stopActiveSubscriptions() {
@@ -142,6 +145,8 @@ export const useStore = create((set, get) => ({
           delete activeSubs['historic_attest_' + ref]
           activeSubs['historic_recon_' + ref]?.()
           delete activeSubs['historic_recon_' + ref]
+          activeSubs['historic_disposition_' + ref]?.()
+          delete activeSubs['historic_disposition_' + ref]
           activeSubs['rev_' + ref]?.()
           const head = live._revisionId
           const received = new Map()
@@ -169,6 +174,8 @@ export const useStore = create((set, get) => ({
                       _reconciliationCheckpoint: null, _reconciliationRows: [],
                       _reconciliationConflict: false, _reconciliationDecisionsChecked: false,
                       _reconciliationDecisionAudit: null,
+                      _dispositionIntentRows: [], _dispositionIntentConflict: false,
+                      _dispositionIntentAudit: null, _dispositionIntentsChecked: false,
                       _memberExitRequests: [], _memberExitStatus: result.removedMembers.length ? 'pending' : 'none',
                       _historicalActivityDetected: false,
                       _consentPolicy: result.consentPolicy, _inviteDecisions: [],
@@ -187,6 +194,7 @@ export const useStore = create((set, get) => ({
               get().watchMemberExits(ref)
               get().watchHistoricalAttestations(ref)
               get().watchHistoricalReconciliations(ref)
+              get().watchHistoricalDispositionIntents(ref)
               // Even a seemingly empty current ledger may hide historical
               // transactions: watch old heads independently of new consent.
               if (result.chain.length > 1 && !activeSubs['prior_' + ref]) {
@@ -272,6 +280,96 @@ export const useStore = create((set, get) => ({
             ...(ready ? {} : { _reconciliationCheckpoint: null }) } : g) }))
       if (ready) void get().refreshReconciliationCheckpoint(ref)
     })
+  },
+
+  // Phase 2E-F-B: evidence of non-effective historical draft preferences.
+  watchHistoricalDispositionIntents: (ref) => {
+    const group = get().getGroup(ref), account = get().pubkey
+    if (!account || !group?.members?.includes(account) ||
+        group._revisionStatus !== 'verified' ||
+        !Array.isArray(group._revisions) || group._revisions.length < 2 ||
+        activeSubs['historic_disposition_' + ref]) return
+    const head = group._revisionId
+    activeSubs['historic_disposition_' + ref] = subscribeHistoricalDispositionIntents(group, row => {
+      if (get().pubkey !== account || currentSessionPubkey !== account ||
+          get().getGroup(ref)?._revisionId !== head) return
+      get().applyHistoricalDispositionIntent(ref, row)
+    }, (ready, audit) => {
+      if (get().pubkey !== account || currentSessionPubkey !== account ||
+          get().getGroup(ref)?._revisionId !== head) return
+      set(s => ({ groups: s.groups.map(g => groupAddress(g) === ref && g._revisionId === head
+        ? { ...g, _dispositionIntentsChecked: ready, _dispositionIntentAudit: audit } : g) }))
+    })
+  },
+
+  applyHistoricalDispositionIntent: (ref, row) => {
+    const account = get().pubkey, group = get().getGroup(ref)
+    if (!account || !group || row?.revisionEventId !== group._revisionId) return
+    set(s => {
+      const groups = s.groups.map(g => {
+        if (groupAddress(g) !== ref || g._revisionId !== row.revisionEventId) return g
+        const previous = g._dispositionIntentRows || []
+        const old = previous.find(item => item.id === row.id)
+        if (old) return JSON.stringify(old) === JSON.stringify(row) ? g :
+          { ...g, _dispositionIntentConflict: true }
+        if (previous.length >= MAX_HISTORICAL_DISPOSITION_INTENTS)
+          return { ...g, _dispositionIntentConflict: true }
+        return { ...g, _dispositionIntentRows: [...previous, row] }
+      })
+      saveGroups(account, groups)
+      return { groups }
+    })
+  },
+
+  signHistoricalDispositionIntent: async (ref, mode) => {
+    const account = get().pubkey, group = get().getGroup(ref)
+    if (!account || !group?.members?.includes(account) ||
+        group._revisionStatus !== 'verified' || group._dispositionIntentConflict ||
+        !group._dispositionIntentsChecked || pendingOutbox(account).length) {
+      throw new Error('Revisione storica o outbox non verificata')
+    }
+    const flight = `${account}:${ref}:${group._revisionId}`
+    if (inFlightDispositionIntents.has(flight)) throw new Error('Firma gia in corso')
+    inFlightDispositionIntents.add(flight)
+    try {
+      const sourceAudit = group._priorRelayAudit
+      const decisionAudit = group._reconciliationDecisionAudit
+      const intentAudit = group._dispositionIntentAudit
+      const reconciliations = group._reconciliationRows || []
+      const intents = group._dispositionIntentRows || []
+      const checkpoint = group._reconciliationCheckpoint, snapshot = group._historicalSnapshot
+      if (!historicalDispositionIntentReady(sourceAudit, decisionAudit, intentAudit))
+        throw new Error('Relay delle decisioni non concordanti')
+      const preview = await buildHistoricalDispositionDrafts({ group, snapshot, checkpoint,
+        reconciliations, sourceAudit, decisionAudit,
+        conflict: group._reconciliationConflict })
+      const current = get().getGroup(ref)
+      if (preview.status !== 'ready-for-review' || get().pubkey !== account ||
+          currentSessionPubkey !== account || current?._revisionId !== group._revisionId ||
+          current?._historicalSnapshot !== snapshot ||
+          current?._reconciliationCheckpoint !== checkpoint ||
+          current?._reconciliationRows !== reconciliations ||
+          current?._dispositionIntentRows !== intents ||
+          current?._priorRelayAudit !== sourceAudit ||
+          current?._reconciliationDecisionAudit !== decisionAudit ||
+          current?._dispositionIntentAudit !== intentAudit ||
+          !current?._dispositionIntentsChecked || current?._dispositionIntentConflict)
+        throw new Error('Bozza o sincronizzazione variata: non firmare')
+      const draft = preview.drafts.find(d => d.mode === mode)
+      const status = historicalDispositionIntentSummary(group, preview.drafts, checkpoint, intents)
+      if (!draft || status.status !== 'pending' || !status.pending.includes(account))
+        throw new Error('Preferenza non valida, gia firmata o in conflitto')
+      const signed = await publishEvent(account, KIND_HISTORICAL_DISPOSITION_INTENT,
+        { version: 1, action: 'review-historical-disposition-v1', groupId: group.id,
+          revisionEventId: group._revisionId, checkpointHash: checkpoint.hash,
+          mode, draftHash: draft.draftHash },
+        historicalDispositionIntentTags(group, draft, preview.drafts[0].historicalNet.map(row => row[0])))
+      if (get().pubkey !== account || get().getGroup(ref)?._revisionId !== group._revisionId) return
+      const parsed = parseHistoricalDispositionIntentEvent(signed, group)
+      if (!parsed) throw new Error('Firma non valida: recuperare dalla outbox')
+      get().applyHistoricalDispositionIntent(ref, parsed)
+      return signed.id
+    } finally { inFlightDispositionIntents.delete(flight) }
   },
 
   applyHistoricalReconciliation: (ref, row) => {

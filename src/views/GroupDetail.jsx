@@ -24,7 +24,7 @@ const statBox = (label, value, color) => (
   </div>
 )
 
-export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddExpense, onSettle, onConfirmSettlement, onInviteDecision, onExpenseDecision, onCancelExpense, onAddMember, onRequestExit, onFinalizeExit, onAttestHistorical, onSignReconciliation }) {
+export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddExpense, onSettle, onConfirmSettlement, onInviteDecision, onExpenseDecision, onCancelExpense, onAddMember, onRequestExit, onFinalizeExit, onAttestHistorical, onSignReconciliation, onSignDispositionIntent }) {
   const [tab, setTab] = useState('expenses')
   const [confirmingId, setConfirmingId] = useState(null)
   const [confirmationError, setConfirmationError] = useState('')
@@ -185,13 +185,18 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
       </section>}
       {group._historicalActivityDetected && <section style={{ padding: '10px 16px',
         borderBottom: '2px solid var(--blue)' }}>
-        <HistoricalDispositionReview group={group}
+        <HistoricalDispositionReview key={group._reconciliationCheckpoint?.hash || group._revisionId}
+          group={group}
           snapshot={group._historicalSnapshot}
           checkpoint={group._reconciliationCheckpoint}
           rows={group._reconciliationRows || []}
           sourceAudit={group._priorRelayAudit}
           decisionAudit={group._reconciliationDecisionAudit}
-          conflict={!!group._reconciliationConflict} account={myPubkey} />
+          conflict={!!group._reconciliationConflict} account={myPubkey}
+          intentRows={group._dispositionIntentRows || []}
+          intentAudit={group._dispositionIntentAudit}
+          intentConflict={!!group._dispositionIntentConflict}
+          onSign={onSignDispositionIntent} />
       </section>}
       {group._priorRelayAudit && (group._revisions || []).length > 1 && (
         <section role="status" style={{ padding: '10px 16px', borderBottom: '2px solid var(--blue)',
