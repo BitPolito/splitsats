@@ -58,7 +58,8 @@ export default function FormerMemberAuditView({ pubkey }) {
     const runtime = { account: pubkey, group: null, events: [], attestations: [],
       snapshot: null, overflow: false, financial: false, eligible: false,
       priorEvidenceOverflow: false, evidence: [], historyChecked: false, version: 0,
-      relayAudit: null, reconciliationRows: [], reconciliationConflict: false,
+      relayAudit: null, reconciliationDecisionAudit: null,
+      reconciliationRows: [], reconciliationConflict: false,
       reconciliationCheckpoint: null, reconciliationVersion: 0, reconcile: null }
     active.current = runtime
     setReport(null); setError(''); setStatus('Recupero definizione del gruppo firmata dal proprietario…')
@@ -73,6 +74,7 @@ export default function FormerMemberAuditView({ pubkey }) {
       setStatus(phase)
       setReport({ group: runtime.group, eligible: runtime.eligible, snapshot: runtime.snapshot,
         relayAudit: runtime.relayAudit,
+        reconciliationDecisionAudit: runtime.reconciliationDecisionAudit,
         reconciliationCheckpoint: runtime.reconciliationCheckpoint,
         reconciliationRows: runtime.reconciliationRows,
         reconciliationConflict: runtime.reconciliationConflict,
@@ -133,7 +135,8 @@ export default function FormerMemberAuditView({ pubkey }) {
       Object.assign(runtime, { group: null, events: [], attestations: [],
         snapshot: null, overflow: false, financial: false, eligible: false,
         priorEvidenceOverflow: false, evidence: [], historyChecked: false, version: 0,
-        replay: null, relayAudit: null, reconciliationRows: [], reconciliationConflict: false,
+        replay: null, relayAudit: null, reconciliationDecisionAudit: null,
+        reconciliationRows: [], reconciliationConflict: false,
         reconciliationCheckpoint: null, reconciliationVersion: 0, reconcile: null })
       show('Verifica delle revisioni firmate dal creatore…')
       const known = new Map()
@@ -173,10 +176,13 @@ export default function FormerMemberAuditView({ pubkey }) {
               else runtime.reconciliationRows = [...previous, row]
             }
             show('Firme sul checkpoint storico aggiornate.')
-          }, ready => {
+          }, (ready, decisionAudit) => {
             if (!alive(version)) return
             runtime.group = { ...runtime.group, _reconciliationDecisionsChecked: ready }
+            runtime.reconciliationDecisionAudit = decisionAudit
             runtime.reconciliationCheckpoint = null
+            setReport(old => old ? { ...old, reconciliationDecisionAudit: decisionAudit,
+              reconciliationCheckpoint: null } : old)
             void refreshReconciliation(version)
           }))
           inner.push(subscribeHistoricalAttestations(historical, row => {
@@ -337,6 +343,7 @@ export default function FormerMemberAuditView({ pubkey }) {
         key={report.reconciliationCheckpoint?.hash || report.group?._revisionId || 'pending'}
         group={report.group} checkpoint={report.reconciliationCheckpoint}
         rows={report.reconciliationRows || []}
+        decisionAudit={report.reconciliationDecisionAudit}
         conflict={!!report.reconciliationConflict} account={pubkey}
         busy={reconBusy} error={reconError} auditOnly onSign={signReconciliation} />}
       {error && <p role="alert" style={{ color: 'var(--red)' }}>{error}</p>}

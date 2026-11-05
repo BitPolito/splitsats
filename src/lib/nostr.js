@@ -17,7 +17,7 @@ import { parseFormerMemberExitHint } from './former-member-audit'
 import { KIND_HISTORICAL_ATTESTATION } from './constants'
 import { parseHistoricalAttestationEvent, historicalAttestationParticipants } from './historical-attestations'
 import { KIND_HISTORICAL_RECONCILIATION } from './constants'
-import { parseHistoricalReconciliationEvent } from './historical-reconciliation'
+import { parseHistoricalReconciliationEvent, reconciliationRelayReady } from './historical-reconciliation'
 
 // ─── npub ↔ hex conversion ────────────────────────────────────────────────────
 // Nostr relays always use hex pubkeys. npub is only a display format.
@@ -304,24 +304,35 @@ export function subscribeHistoricalReconciliations(group, onReconciliation, onSy
   const address = groupAddress(group)
   const authors = historicalAttestationParticipants(group)
   if (!address || !authors) throw new Error('Revisioni storiche non verificate')
-  const eoses = new Set()
-  return pool.subscribe({
+  // EOSE alone is insufficient. The immutable 9597 vote sets must match on
+  // every configured relay epoch before another acknowledgement can be signed.
+  // RelayPool calls onRelayEvent only after signature verification and before
+  // cross-relay deduplication; never infer payment finality from this audit.
+  const audit = new RelaySnapshotAudit(RELAYS)
+  const notify = () => {
+    const report = audit.report()
+    onSynced?.(reconciliationRelayReady(report), report)
+  }
+  const stop = pool.subscribe({
     id: 'historic_recon_' + address,
     filters: [{ kinds: [KIND_HISTORICAL_RECONCILIATION], authors,
-      '#a': [address], '#g': [group.id], '#r': [group._revisionId], limit: 300 }],
+      '#a': [address], '#g': [group.id], '#r': [group._revisionId], limit: 500 }],
     onEvent: event => {
       const row = parseHistoricalReconciliationEvent(event, group)
       if (row) onReconciliation(row)
     },
-    onRelayEose: relay => {
-      eoses.add(relay)
-      onSynced?.(eoses.size === RELAYS.length)
+    onRelayEvent: (event, relay) => {
+      const before = audit.report().status
+      audit.record(relay, event)
+      // Most initial events require no state update; EOSE notifies below.
+      // Any changed post-EOSE snapshot immediately revokes readiness.
+      if (audit.report().status !== before) notify()
     },
-    onRelayReset: relay => {
-      eoses.delete(relay)
-      onSynced?.(false)
-    },
+    onRelayEose: relay => { audit.eose(relay); notify() },
+    onRelayReset: (relay, reason) => { audit.reset(relay, reason); notify() },
   })
+  notify()
+  return stop
 }
 
 // Voluntary leave requests stay retrievable by current members even after

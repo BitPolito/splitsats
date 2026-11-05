@@ -171,6 +171,7 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
         <HistoricalReconciliationPanel key={group._reconciliationCheckpoint?.hash || group._revisionId}
           group={group} checkpoint={group._reconciliationCheckpoint}
           rows={group._reconciliationRows || []} conflict={!!group._reconciliationConflict}
+          decisionAudit={group._reconciliationDecisionAudit}
           account={myPubkey} busy={reconBusy} error={reconError}
           onSign={async () => {
             if (reconSigning.current) return

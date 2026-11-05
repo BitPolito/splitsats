@@ -10,6 +10,7 @@ const SAT_LIMIT = 2_100_000_000_000_000
 const now = () => Math.floor(Date.now() / 1000)
 const FIELDS = ['action', 'checkpointHash', 'groupId', 'revisionEventId', 'snapshotHash', 'version']
 export const MAX_HISTORICAL_RECONCILIATIONS = 200
+export const MAX_RECONCILIATION_CONFLICT_SAMPLES = 8
 
 // Only a matching *observed* per-relay snapshot can be proposed for review.
 // Even this does not certify completeness, as all relays may omit the same data.
@@ -146,4 +147,65 @@ export function historicalReconciliationSummary(group, checkpoint, rows = []) {
   const signed = members.filter(m => signedBy.has(m))
   const pending = members.filter(m => !signedBy.has(m))
   return { ...base, status: pending.length ? 'pending' : 'agreed', signed, pending }
+}
+
+// 2E-E-B: inspect all signature-verified 9597 evidence, including conflicting
+// proposals no longer matching the locally observed checkpoint. Diagnostic only:
+// never authorize debt, settlement or automatic supersession based on this.
+export function historicalReconciliationConflicts(group, checkpoint, rows = []) {
+  const members = historicalAttestationParticipants(group)
+  const base = { status: 'unavailable', signatureCount: 0, reasons: [],
+    doubleSigners: [], competingCheckpointCount: 0, competingCheckpointHashes: [],
+    competingSnapshotCount: 0, competingSnapshotHashes: [],
+    safeForPayments: false, completeHistory: false }
+  if (!Array.isArray(rows) || rows.length > MAX_HISTORICAL_RECONCILIATIONS) {
+    return { ...base, status: 'conflict', reasons: ['over-limit'] }
+  }
+  const ids = new Map(), signedBy = new Map()
+  const reasons = new Set(), doubleSigners = new Set()
+  const competingCheckpoints = new Set(), competingSnapshots = new Set()
+  if (!members || (checkpoint && (
+      checkpoint.revisionEventId !== group._revisionId ||
+      !HEX.test(checkpoint.hash || '') || !HEX.test(checkpoint.snapshotHash || '')))) {
+    reasons.add('stale-revision')
+  }
+  for (const row of rows) {
+    if (!row || !HEX.test(row.id || '') || !HEX.test(row.checkpointHash || '') ||
+        !HEX.test(row.snapshotHash || '') || !members?.includes(row.member) ||
+        !Number.isSafeInteger(row.signedAt) ||
+        row.revisionEventId !== group?._revisionId) {
+      reasons.add('invalid-evidence')
+      continue
+    }
+    const fingerprint = JSON.stringify(row)
+    if (ids.has(row.id)) {
+      if (ids.get(row.id) !== fingerprint) reasons.add('same-id-different-envelope')
+      continue
+    }
+    ids.set(row.id, fingerprint)
+    if (signedBy.has(row.member)) {
+      doubleSigners.add(row.member)
+      reasons.add('multiple-signatures')
+    }
+    signedBy.set(row.member, row)
+    if (checkpoint && row.checkpointHash !== checkpoint.hash) {
+      competingCheckpoints.add(row.checkpointHash)
+      reasons.add('alternative-checkpoint')
+    }
+    if (checkpoint && row.snapshotHash !== checkpoint.snapshotHash) {
+      competingSnapshots.add(row.snapshotHash)
+      reasons.add('alternative-snapshot')
+    }
+  }
+  const summary = historicalReconciliationSummary(group, checkpoint, rows)
+  const status = reasons.size || summary.status === 'conflict' ? 'conflict' : summary.status
+  return {
+    ...base, status, signatureCount: ids.size,
+    reasons: [...reasons].sort(),
+    doubleSigners: [...doubleSigners].sort().slice(0, MAX_RECONCILIATION_CONFLICT_SAMPLES),
+    competingCheckpointCount: competingCheckpoints.size,
+    competingCheckpointHashes: [...competingCheckpoints].sort().slice(0, MAX_RECONCILIATION_CONFLICT_SAMPLES),
+    competingSnapshotCount: competingSnapshots.size,
+    competingSnapshotHashes: [...competingSnapshots].sort().slice(0, MAX_RECONCILIATION_CONFLICT_SAMPLES),
+  }
 }
