@@ -1,8 +1,8 @@
 import { create } from 'zustand'
 import { saveGroups, loadProfiles, saveProfiles, loadPubkey, savePubkey, clearAll, clearPubkey } from '../lib/storage'
 import { verifyCachedSigner } from '../lib/session-identity'
-import { publishEvent, fetchProfile, fetchGroups, subscribeGroupRevisions, subscribeGroupInvitations, subscribeExpenseDecisions, subscribeExpenseCancellations, subscribePriorRevisionActivity, subscribeMemberExitRequests, subscribeHistoricalAttestations, pendingOutbox, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
-import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION, KIND_GROUP_REVISION, KIND_GROUP_INVITATION, KIND_EXPENSE_DECISION, KIND_EXPENSE_CANCELLATION, KIND_MEMBER_EXIT, KIND_HISTORICAL_ATTESTATION } from '../lib/constants'
+import { publishEvent, fetchProfile, fetchGroups, subscribeGroupRevisions, subscribeGroupInvitations, subscribeExpenseDecisions, subscribeExpenseCancellations, subscribePriorRevisionActivity, subscribeMemberExitRequests, subscribeHistoricalAttestations, subscribeHistoricalReconciliations, pendingOutbox, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
+import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION, KIND_GROUP_REVISION, KIND_GROUP_INVITATION, KIND_EXPENSE_DECISION, KIND_EXPENSE_CANCELLATION, KIND_MEMBER_EXIT, KIND_HISTORICAL_ATTESTATION, KIND_HISTORICAL_RECONCILIATION } from '../lib/constants'
 import { validPubkey } from '../lib/event-validation'
 import { groupAddress } from '../lib/group-history'
 import { parseGroupRevisionEvent, revisionTags, verifyGroupRevisionHistory, membersForRevisionEvent } from '../lib/group-revision-log'
@@ -16,6 +16,11 @@ import { canResumeAfterPriorHistory } from '../lib/prior-history-gate'
 import { priorFinancialEvidence, appendPriorEvidence } from '../lib/prior-financial-evidence'
 import { appendHistoricalReplayEvent, replayHistoricalFinancialEvents } from '../lib/historical-financial-replay'
 import { buildHistoricalAttestationSnapshot, parseHistoricalAttestationEvent, historicalAttestationTags, historicalAttestationSummary, MAX_HISTORICAL_ATTESTATIONS } from '../lib/historical-attestations'
+import {
+  buildHistoricalReconciliationCheckpoint, parseHistoricalReconciliationEvent,
+  historicalReconciliationTags, historicalReconciliationSummary,
+  MAX_HISTORICAL_RECONCILIATIONS,
+} from '../lib/historical-reconciliation'
 import { memberExitTags, parseMemberExitRequestEvent, verifyMemberExitProofs, assertCanRequestExit, assertCanFinalizeExit } from '../lib/member-exits'
 import { expenseCancellationTags, parseExpenseCancellationEvent, expenseCancellationSummary } from '../lib/expense-cancellations'
 
@@ -24,6 +29,7 @@ const now    = () => Math.floor(Date.now() / 1000)
 
 const activeSubs = {}
 const subscribedMemberKeys = {}
+const inFlightReconciliations = new Set()
 let currentSessionPubkey = null
 
 function stopActiveSubscriptions() {
@@ -134,6 +140,8 @@ export const useStore = create((set, get) => ({
           delete activeSubs['leave_' + ref]
           activeSubs['historic_attest_' + ref]?.()
           delete activeSubs['historic_attest_' + ref]
+          activeSubs['historic_recon_' + ref]?.()
+          delete activeSubs['historic_recon_' + ref]
           activeSubs['rev_' + ref]?.()
           const head = live._revisionId
           const received = new Map()
@@ -158,6 +166,8 @@ export const useStore = create((set, get) => ({
                       _priorRelayAudit: null,
                       _historicalSnapshot: null, _historicalAttestations: [],
                       _historicalAttestationConflict: false,
+                      _reconciliationCheckpoint: null, _reconciliationRows: [],
+                      _reconciliationConflict: false, _reconciliationDecisionsChecked: false,
                       _memberExitRequests: [], _memberExitStatus: result.removedMembers.length ? 'pending' : 'none',
                       _historicalActivityDetected: false,
                       _consentPolicy: result.consentPolicy, _inviteDecisions: [],
@@ -175,6 +185,7 @@ export const useStore = create((set, get) => ({
               // removed member still appears in the current group definition.
               get().watchMemberExits(ref)
               get().watchHistoricalAttestations(ref)
+              get().watchHistoricalReconciliations(ref)
               // Even a seemingly empty current ledger may hide historical
               // transactions: watch old heads independently of new consent.
               if (result.chain.length > 1 && !activeSubs['prior_' + ref]) {
@@ -240,6 +251,46 @@ export const useStore = create((set, get) => ({
     })
   },
 
+  watchHistoricalReconciliations: (ref) => {
+    const group = get().getGroup(ref), account = get().pubkey
+    if (!account || !group?.members?.includes(account) ||
+        group._revisionStatus !== 'verified' ||
+        !Array.isArray(group._revisions) || group._revisions.length < 2 ||
+        activeSubs['historic_recon_' + ref]) return
+    const head = group._revisionId
+    activeSubs['historic_recon_' + ref] = subscribeHistoricalReconciliations(group, row => {
+      if (get().pubkey !== account || currentSessionPubkey !== account ||
+          get().getGroup(ref)?._revisionId !== head) return
+      get().applyHistoricalReconciliation(ref, row)
+    }, ready => {
+      if (get().pubkey !== account || currentSessionPubkey !== account ||
+          get().getGroup(ref)?._revisionId !== head) return
+      set(s => ({ groups: s.groups.map(g => groupAddress(g) === ref && g._revisionId === head
+        ? { ...g, _reconciliationDecisionsChecked: ready,
+            ...(ready ? {} : { _reconciliationCheckpoint: null }) } : g) }))
+      if (ready) void get().refreshReconciliationCheckpoint(ref)
+    })
+  },
+
+  applyHistoricalReconciliation: (ref, row) => {
+    const group = get().getGroup(ref), account = get().pubkey
+    if (!account || !group || row?.revisionEventId !== group._revisionId) return
+    set(s => {
+      const groups = s.groups.map(g => {
+        if (groupAddress(g) !== ref || g._revisionId !== row.revisionEventId) return g
+        const prior = g._reconciliationRows || []
+        const duplicate = prior.find(item => item.id === row.id)
+        if (duplicate) return JSON.stringify(duplicate) === JSON.stringify(row) ? g :
+          { ...g, _reconciliationConflict: true }
+        if (prior.length >= MAX_HISTORICAL_RECONCILIATIONS)
+          return { ...g, _reconciliationConflict: true }
+        return { ...g, _reconciliationRows: [...prior, row] }
+      })
+      saveGroups(account, groups)
+      return { groups }
+    })
+  },
+
   applyHistoricalAttestation: (ref, row) => {
     const group = get().getGroup(ref)
     if (!group || row?.revisionEventId !== group._revisionId) return
@@ -259,6 +310,7 @@ export const useStore = create((set, get) => ({
       saveGroups(account, groups)
       return { groups }
     })
+    void get().refreshReconciliationCheckpoint(ref)
   },
 
   refreshHistoricalSnapshot: async (ref) => {
@@ -279,6 +331,81 @@ export const useStore = create((set, get) => ({
       saveGroups(account, groups)
       return { groups }
     })
+    void get().refreshReconciliationCheckpoint(ref)
+  },
+
+  refreshReconciliationCheckpoint: async (ref) => {
+    const account = get().pubkey, group = get().getGroup(ref)
+    if (!account || !group || group._revisionStatus !== 'verified' ||
+        !group._priorHistoryChecked) return
+    const head = group._revisionId, events = group._priorReplayEvents || []
+    const audit = group._priorRelayAudit, attestations = group._historicalAttestations || []
+    const replay = replayHistoricalFinancialEvents(group, events,
+      { overflow: !!group._priorReplayOverflow })
+    const fresh = await buildHistoricalAttestationSnapshot(group, events, replay)
+    const checkpoint = fresh?.hash === group._historicalSnapshot?.hash
+      ? await buildHistoricalReconciliationCheckpoint(group, fresh, replay, audit, attestations)
+      : null
+    const current = get().getGroup(ref)
+    if (get().pubkey !== account || currentSessionPubkey !== account ||
+        current?._revisionId !== head || current?._priorReplayEvents !== events ||
+        current?._priorRelayAudit !== audit || current?._historicalAttestations !== attestations ||
+        current?._reconciliationDecisionsChecked !== group._reconciliationDecisionsChecked ||
+        current?._historicalSnapshot?.hash !== group._historicalSnapshot?.hash ||
+        current?._historicalAttestationConflict !== group._historicalAttestationConflict) return
+    set(s => {
+      const groups = s.groups.map(g => groupAddress(g) === ref && g._revisionId === head
+        ? { ...g, _reconciliationCheckpoint: checkpoint } : g)
+      saveGroups(account, groups)
+      return { groups }
+    })
+  },
+
+  signHistoricalReconciliation: async (ref) => {
+    const account = get().pubkey, group = get().getGroup(ref)
+    if (!account || !group?.members?.includes(account) ||
+        group._revisionStatus !== 'verified' || !group._priorHistoryChecked ||
+        group._reconciliationConflict || pendingOutbox(account).length) {
+      throw new Error('Riconciliazione non disponibile o outbox in sospeso')
+    }
+    const flightKey = `${account}:${ref}:${group._revisionId}`
+    if (inFlightReconciliations.has(flightKey))
+      throw new Error('Firma della riconciliazione già in corso')
+    inFlightReconciliations.add(flightKey)
+    try {
+    const events = group._priorReplayEvents || []
+    const audit = group._priorRelayAudit, attestations = group._historicalAttestations || []
+    const replay = replayHistoricalFinancialEvents(group, events,
+      { overflow: !!group._priorReplayOverflow })
+    const fresh = await buildHistoricalAttestationSnapshot(group, events, replay)
+    const checkpoint = fresh?.hash === group._historicalSnapshot?.hash
+      ? await buildHistoricalReconciliationCheckpoint(group, fresh, replay, audit, attestations)
+      : null
+    const current = get().getGroup(ref)
+    if (!checkpoint || checkpoint.hash !== group._reconciliationCheckpoint?.hash ||
+        get().pubkey !== account || currentSessionPubkey !== account ||
+        current?._revisionId !== group._revisionId || current?._priorReplayEvents !== events ||
+        current?._priorRelayAudit !== audit || current?._historicalAttestations !== attestations ||
+        current?._reconciliationConflict || current?._historicalAttestationConflict ||
+        current?._historicalSnapshot?.hash !== group._historicalSnapshot?.hash ||
+        current?._reconciliationCheckpoint?.hash !== checkpoint.hash ||
+        !current?._reconciliationDecisionsChecked) {
+      throw new Error('Checkpoint cambiato o sincronizzazione incompleta: non firmare')
+    }
+    const state = historicalReconciliationSummary(group, checkpoint, group._reconciliationRows || [])
+    if (state.status !== 'pending' || !state.pending.includes(account)) {
+      throw new Error('Riconciliazione gia firmata o in conflitto')
+    }
+    const signed = await publishEvent(account, KIND_HISTORICAL_RECONCILIATION,
+      { version: 1, action: 'acknowledge-reconciliation-v1', groupId: group.id,
+        revisionEventId: group._revisionId, snapshotHash: checkpoint.snapshotHash,
+        checkpointHash: checkpoint.hash }, historicalReconciliationTags(group, checkpoint))
+    if (get().pubkey !== account || get().getGroup(ref)?._revisionId !== group._revisionId) return
+    const parsed = parseHistoricalReconciliationEvent(signed, group)
+    if (!parsed) throw new Error('Firma non valida: recupera solo evento originale dalla outbox')
+    get().applyHistoricalReconciliation(ref, parsed)
+    return signed.id
+    } finally { inFlightReconciliations.delete(flightKey) }
   },
 
   attestHistoricalSnapshot: async (ref) => {
@@ -332,7 +459,7 @@ export const useStore = create((set, get) => ({
             ? appendPriorEvidence(g._priorFinancialEvidence || [], evidence)
             : { rows: g._priorFinancialEvidence || [], overflow: true }
         const unsafe = !isInvitation || replay.overflow
-        return { ...g, _priorReplayEvents: replay.events,
+        return { ...g, _priorReplayEvents: replay.events, _reconciliationCheckpoint: null,
           _priorReplayOverflow: !!g._priorReplayOverflow || replay.overflow,
           _priorFinancialEvidence: update.rows,
           _priorEvidenceOverflow: !!g._priorEvidenceOverflow || update.overflow || replay.overflow,
@@ -362,10 +489,11 @@ export const useStore = create((set, get) => ({
         report.safeForPayments !== false || report.completeHistory !== false) return
     set(s => {
       const groups = s.groups.map(g => groupAddress(g) === ref && g._revisionId === head
-        ? { ...g, _priorRelayAudit: report } : g)
+        ? { ...g, _priorRelayAudit: report, _reconciliationCheckpoint: null } : g)
       saveGroups(account, groups)
       return { groups }
     })
+    void get().refreshReconciliationCheckpoint(ref)
   },
 
   // ─── PRIOR-REVISION FINANCIAL SAFETY BARRIER ─────────────────────────────

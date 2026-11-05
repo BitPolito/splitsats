@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { simplifyDebts } from '../lib/balances'
 import { approvedSettlements, settlementStatus } from '../lib/settlement-status'
 import { getPaymentAttempt } from '../lib/payment-attempts'
@@ -11,6 +11,7 @@ import { priorEvidenceCounts } from '../lib/prior-financial-evidence'
 import { replayHistoricalFinancialEvents } from '../lib/historical-financial-replay'
 import { historicalAttestationSummary } from '../lib/historical-attestations'
 import RelaySnapshotDiagnostics from '../components/RelaySnapshotDiagnostics'
+import HistoricalReconciliationPanel from '../components/HistoricalReconciliationPanel'
 
 const sats = (n) => Number(n).toLocaleString() + ' sat'
 const CATS = { food:'🍕', transport:'🚌', accommodation:'🏠', entertainment:'🎉', utilities:'⚡', other:'📦' }
@@ -22,7 +23,7 @@ const statBox = (label, value, color) => (
   </div>
 )
 
-export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddExpense, onSettle, onConfirmSettlement, onInviteDecision, onExpenseDecision, onCancelExpense, onAddMember, onRequestExit, onFinalizeExit, onAttestHistorical }) {
+export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddExpense, onSettle, onConfirmSettlement, onInviteDecision, onExpenseDecision, onCancelExpense, onAddMember, onRequestExit, onFinalizeExit, onAttestHistorical, onSignReconciliation }) {
   const [tab, setTab] = useState('expenses')
   const [confirmingId, setConfirmingId] = useState(null)
   const [confirmationError, setConfirmationError] = useState('')
@@ -30,6 +31,9 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
   const [leaveBusy, setLeaveBusy] = useState(false)
   const [historyBusy, setHistoryBusy] = useState(false)
   const [historyError, setHistoryError] = useState('')
+  const [reconBusy, setReconBusy] = useState(false)
+  const [reconError, setReconError] = useState('')
+  const reconSigning = useRef(false)
   const [leaveError, setLeaveError] = useState('')
   const [memberInput, setMemberInput] = useState('')
   const [memberBusy, setMemberBusy] = useState(false)
@@ -162,6 +166,21 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
           })()}
         </section>
       )}
+      {group._historicalActivityDetected && <section style={{ padding: '10px 16px',
+        borderBottom: '2px solid var(--blue)', fontFamily: 'var(--mono)', fontSize: 10 }}>
+        <HistoricalReconciliationPanel key={group._reconciliationCheckpoint?.hash || group._revisionId}
+          group={group} checkpoint={group._reconciliationCheckpoint}
+          rows={group._reconciliationRows || []} conflict={!!group._reconciliationConflict}
+          account={myPubkey} busy={reconBusy} error={reconError}
+          onSign={async () => {
+            if (reconSigning.current) return
+            reconSigning.current = true
+            setReconBusy(true); setReconError('')
+            try { await onSignReconciliation() }
+            catch (e) { setReconError(e.message || 'Errore durante la firma') }
+            finally { reconSigning.current = false; setReconBusy(false) }
+          }} />
+      </section>}
       {group._priorRelayAudit && (group._revisions || []).length > 1 && (
         <section role="status" style={{ padding: '10px 16px', borderBottom: '2px solid var(--blue)',
           fontFamily: 'var(--mono)', fontSize: 10, lineHeight: 1.7 }}>

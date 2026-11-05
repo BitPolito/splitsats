@@ -20,5 +20,6 @@ export const KIND_EXPENSE_CANCELLATION = 9594 // Participant-signed disputed pro
 
 export const KIND_MEMBER_EXIT = 9595 // Voluntary member-signed leave request
 export const KIND_HISTORICAL_ATTESTATION = 9596 // Historical snapshot signature; NEVER a payment authorization
+export const KIND_HISTORICAL_RECONCILIATION = 9597 // Unanimous proposed net acknowledgment; NEVER a payment authorization
 
 export const APP_TAG = 'splitsats'    // Tag all our events for filtering
