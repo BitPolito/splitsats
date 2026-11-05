@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import RelaySnapshotDiagnostics from '../components/RelaySnapshotDiagnostics'
 import HistoricalReconciliationPanel from '../components/HistoricalReconciliationPanel'
+import HistoricalDispositionReview from '../components/HistoricalDispositionReview'
 import {
   subscribeFormerMemberExitHints, subscribeFormerMemberGroupDefinition,
   subscribeGroupRevisions, subscribeMemberExitRequests, subscribePriorRevisionActivity,
@@ -346,6 +347,14 @@ export default function FormerMemberAuditView({ pubkey }) {
         decisionAudit={report.reconciliationDecisionAudit}
         conflict={!!report.reconciliationConflict} account={pubkey}
         busy={reconBusy} error={reconError} auditOnly onSign={signReconciliation} />}
+      {report?.eligible && <HistoricalDispositionReview
+        key={report.reconciliationCheckpoint?.hash || report.group?._revisionId || 'pending'}
+        group={report.group} snapshot={report.snapshot}
+        checkpoint={report.reconciliationCheckpoint}
+        rows={report.reconciliationRows || []}
+        sourceAudit={report.relayAudit}
+        decisionAudit={report.reconciliationDecisionAudit}
+        conflict={!!report.reconciliationConflict} account={pubkey} />}
       {error && <p role="alert" style={{ color: 'var(--red)' }}>{error}</p>}
     </div>}
     <p style={{ color: 'var(--red)' }}>EOSE non dimostra che lo storico sia completo. Una firma non prova il pagamento e non libera nessuno da un debito.</p>
