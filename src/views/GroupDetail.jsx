@@ -10,6 +10,7 @@ import { expenseCancellationSummary, cancellationParticipants } from '../lib/exp
 import { priorEvidenceCounts } from '../lib/prior-financial-evidence'
 import { replayHistoricalFinancialEvents } from '../lib/historical-financial-replay'
 import { historicalAttestationSummary } from '../lib/historical-attestations'
+import RelaySnapshotDiagnostics from '../components/RelaySnapshotDiagnostics'
 
 const sats = (n) => Number(n).toLocaleString() + ' sat'
 const CATS = { food:'🍕', transport:'🚌', accommodation:'🏠', entertainment:'🎉', utilities:'⚡', other:'📦' }
@@ -165,11 +166,7 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
         <section role="status" style={{ padding: '10px 16px', borderBottom: '2px solid var(--blue)',
           fontFamily: 'var(--mono)', fontSize: 10, lineHeight: 1.7 }}>
           <strong>CONFRONTO RELAY — SOLO DIAGNOSTICA</strong>
-          <div>Snapshot osservati: {group._priorRelayAudit.status} · EOSE {group._priorRelayAudit.completedRelays}/{group._priorRelayAudit.configuredRelays}</div>
-          {(group._priorRelayAudit.relays || []).map(row => (
-            <div key={row.relay}>{row.relay} · {row.phase} · {row.eventCount} ID firmati</div>
-          ))}
-          <div>Accordo fra relay non dimostra completezza. Nessuno sblocco di saldi o pagamenti.</div>
+          <RelaySnapshotDiagnostics audit={group._priorRelayAudit} />
         </section>
       )}
       {group._consentPolicy === CONSENT_POLICY && (

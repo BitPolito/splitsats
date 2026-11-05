@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import RelaySnapshotDiagnostics from '../components/RelaySnapshotDiagnostics'
 import {
   subscribeFormerMemberExitHints, subscribeFormerMemberGroupDefinition,
   subscribeGroupRevisions, subscribeMemberExitRequests, subscribePriorRevisionActivity,
@@ -215,8 +216,8 @@ export default function FormerMemberAuditView({ pubkey }) {
       {report?.eligible && <div>ACCESSO ARCHIVIO VERIFICATO — SOLA LETTURA</div>}
       {report?.replay && <div>Ricostruzione: {report.replay.status} · eventi osservati {report.eventCount}</div>}
       {report?.relayAudit && <div role="status">
-        Confronto relay: {report.relayAudit.status} · EOSE {report.relayAudit.completedRelays}/{report.relayAudit.configuredRelays}.
-        Nessuna prova di completezza, nessuno sblocco dei pagamenti.
+        <strong>CONFRONTO RELAY — ARCHIVIO</strong>
+        <RelaySnapshotDiagnostics audit={report.relayAudit} />
       </div>}
       {report?.snapshot && <>
         <div>Hash osservato: <code>{report.snapshot.hash}</code></div>

@@ -3,6 +3,7 @@
 // Matching snapshots do not establish relay completeness, finality or payment proof.
 const HEX = /^[0-9a-f]{64}$/
 export const MAX_AUDIT_IDS_PER_RELAY = 500
+export const MAX_DIAGNOSTIC_SAMPLE = 8
 
 function eventIdentity(event) {
   if (!HEX.test(event?.id || '') || !HEX.test(event?.pubkey || '') ||
@@ -70,6 +71,15 @@ export class RelaySnapshotAudit {
   report() {
     const rows = [...this.relays.values()]
     const completed = rows.filter(r => r.eose && r.phase === 'eose')
+    // Compare only source epochs that finished EOSE. Loading/offline relays
+    // must not be labelled as missing events they have yet to retrieve.
+    const observedIds = [...new Set(completed.flatMap(r => [...r.ids.keys()]))].sort()
+    const differingEnvelopes = observedIds.filter(id =>
+      new Set(completed.filter(r => r.ids.has(id)).map(r => r.ids.get(id))).size > 1)
+    const notObserved = new Map(completed.length >= 2 ? completed.map(r => {
+      const ids = observedIds.filter(id => !r.ids.has(id))
+      return [r.relay, { count: ids.length, sample: ids.slice(0, MAX_DIAGNOSTIC_SAMPLE) }]
+    }) : [])
     const base = completed[0]?.ids || null
     const mismatch = completed.some(r => {
       if (!base || r.ids.size !== base.size) return true
@@ -88,10 +98,17 @@ export class RelaySnapshotAudit {
     return Object.freeze({
       status, configuredRelays: rows.length, completedRelays: completed.length,
       allEose, comparable: completed.length >= 2,
+      // This is an observed union, not a proof of historical completeness.
+      observedUnionEventCount: observedIds.length,
+      differingEnvelopeCount: differingEnvelopes.length,
+      differingEnvelopeSample: differingEnvelopes.slice(0, MAX_DIAGNOSTIC_SAMPLE),
+      diagnosticSampleLimit: MAX_DIAGNOSTIC_SAMPLE,
       safeForPayments: false, completeHistory: false,
       relays: rows.map(r => ({ relay: r.relay, phase: r.phase, epoch: r.epoch,
         eose: r.eose, eventCount: r.ids.size, overflow: r.overflow, saturated: r.saturated,
-        lateEvents: r.late, conflict: r.conflict })),
+        lateEvents: r.late, conflict: r.conflict,
+        notObservedCount: notObserved.get(r.relay)?.count ?? null,
+        notObservedSample: notObserved.get(r.relay)?.sample ?? [] })),
     })
   }
 }
