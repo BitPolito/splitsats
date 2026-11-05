@@ -18,6 +18,8 @@ import { KIND_HISTORICAL_ATTESTATION } from './constants'
 import { parseHistoricalAttestationEvent, historicalAttestationParticipants } from './historical-attestations'
 import { KIND_HISTORICAL_RECONCILIATION } from './constants'
 import { parseHistoricalReconciliationEvent, reconciliationRelayReady } from './historical-reconciliation'
+import { KIND_HISTORICAL_DISPOSITION_INTENT } from './constants'
+import { parseHistoricalDispositionIntentEvent } from './historical-disposition-intents'
 
 // ─── npub ↔ hex conversion ────────────────────────────────────────────────────
 // Nostr relays always use hex pubkeys. npub is only a display format.
@@ -326,6 +328,38 @@ export function subscribeHistoricalReconciliations(group, onReconciliation, onSy
       audit.record(relay, event)
       // Most initial events require no state update; EOSE notifies below.
       // Any changed post-EOSE snapshot immediately revokes readiness.
+      if (audit.report().status !== before) notify()
+    },
+    onRelayEose: relay => { audit.eose(relay); notify() },
+    onRelayReset: (relay, reason) => { audit.reset(relay, reason); notify() },
+  })
+  notify()
+  return stop
+}
+
+// Signed, non-effective historical disposition review statements (kind:9598).
+// Observe each signed relay envelope before deduplicating across relay sources.
+// EOSE agreement does NOT establish global completeness or debt discharge.
+export function subscribeHistoricalDispositionIntents(group, onIntent, onAudit) {
+  const address = groupAddress(group)
+  const authors = historicalAttestationParticipants(group)
+  if (!address || !authors) throw new Error('Catena storica non verificata')
+  const audit = new RelaySnapshotAudit(RELAYS)
+  const notify = () => {
+    const report = audit.report()
+    onAudit?.(reconciliationRelayReady(report), report)
+  }
+  const stop = pool.subscribe({
+    id: 'historic_disposition_' + address,
+    filters: [{ kinds: [KIND_HISTORICAL_DISPOSITION_INTENT], authors,
+      '#a': [address], '#g': [group.id], '#r': [group._revisionId], limit: 500 }],
+    onEvent: event => {
+      const row = parseHistoricalDispositionIntentEvent(event, group)
+      if (row) onIntent(row)
+    },
+    onRelayEvent: (event, relay) => {
+      const before = audit.report().status
+      audit.record(relay, event)
       if (audit.report().status !== before) notify()
     },
     onRelayEose: relay => { audit.eose(relay); notify() },

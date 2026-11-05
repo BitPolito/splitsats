@@ -5,7 +5,7 @@ import HistoricalDispositionReview from '../components/HistoricalDispositionRevi
 import {
   subscribeFormerMemberExitHints, subscribeFormerMemberGroupDefinition,
   subscribeGroupRevisions, subscribeMemberExitRequests, subscribePriorRevisionActivity,
-  subscribeHistoricalAttestations, subscribeHistoricalReconciliations, pendingOutbox, publishEvent,
+  subscribeHistoricalAttestations, subscribeHistoricalReconciliations, subscribeHistoricalDispositionIntents, pendingOutbox, publishEvent,
 } from '../lib/nostr'
 import { verifyGroupRevisionHistory } from '../lib/group-revision-log'
 import { isNewerGroupDefinition } from '../lib/event-validation'
@@ -22,7 +22,9 @@ import {
   historicalReconciliationSummary, parseHistoricalReconciliationEvent,
   MAX_HISTORICAL_RECONCILIATIONS,
 } from '../lib/historical-reconciliation'
-import { KIND_HISTORICAL_ATTESTATION, KIND_HISTORICAL_RECONCILIATION, KIND_GROUP_INVITATION } from '../lib/constants'
+import { KIND_HISTORICAL_ATTESTATION, KIND_HISTORICAL_RECONCILIATION, KIND_HISTORICAL_DISPOSITION_INTENT, KIND_GROUP_INVITATION } from '../lib/constants'
+import { historicalDispositionIntentTags, parseHistoricalDispositionIntentEvent, historicalDispositionIntentSummary, historicalDispositionIntentReady, MAX_HISTORICAL_DISPOSITION_INTENTS } from '../lib/historical-disposition-intents'
+import { buildHistoricalDispositionDrafts } from '../lib/historical-disposition'
 
 // This view deliberately keeps archival groups OUT of Zustand's active `groups`.
 // No active-group actions, debt transfer or Lightning payment can originate here.
@@ -40,6 +42,7 @@ export default function FormerMemberAuditView({ pubkey }) {
   const [reconBusy, setReconBusy] = useState(false)
   const [reconError, setReconError] = useState('')
   const reconSigning = useRef(false)
+  const intentSigning = useRef(false)
   const active = useRef(null)
 
   useEffect(() => {
@@ -60,6 +63,8 @@ export default function FormerMemberAuditView({ pubkey }) {
       snapshot: null, overflow: false, financial: false, eligible: false,
       priorEvidenceOverflow: false, evidence: [], historyChecked: false, version: 0,
       relayAudit: null, reconciliationDecisionAudit: null,
+      dispositionIntentRows: [], dispositionIntentConflict: false,
+      dispositionIntentAudit: null, dispositionIntentsChecked: false,
       reconciliationRows: [], reconciliationConflict: false,
       reconciliationCheckpoint: null, reconciliationVersion: 0, reconcile: null }
     active.current = runtime
@@ -78,6 +83,9 @@ export default function FormerMemberAuditView({ pubkey }) {
         reconciliationDecisionAudit: runtime.reconciliationDecisionAudit,
         reconciliationCheckpoint: runtime.reconciliationCheckpoint,
         reconciliationRows: runtime.reconciliationRows,
+        dispositionIntentRows: runtime.dispositionIntentRows,
+        dispositionIntentConflict: runtime.dispositionIntentConflict,
+        dispositionIntentAudit: runtime.dispositionIntentAudit,
         reconciliationConflict: runtime.reconciliationConflict,
         replay: runtime.replay, summary: runtime.group && runtime.snapshot
           ? historicalAttestationSummary(runtime.group, runtime.snapshot, runtime.attestations)
@@ -138,6 +146,8 @@ export default function FormerMemberAuditView({ pubkey }) {
         priorEvidenceOverflow: false, evidence: [], historyChecked: false, version: 0,
         replay: null, relayAudit: null, reconciliationDecisionAudit: null,
         reconciliationRows: [], reconciliationConflict: false,
+        dispositionIntentRows: [], dispositionIntentConflict: false,
+        dispositionIntentAudit: null, dispositionIntentsChecked: false,
         reconciliationCheckpoint: null, reconciliationVersion: 0, reconcile: null })
       show('Verifica delle revisioni firmate dal creatore…')
       const known = new Map()
@@ -166,6 +176,26 @@ export default function FormerMemberAuditView({ pubkey }) {
           }
           runtime.eligible = true
           runtime.reconcile = () => void refreshReconciliation(version)
+          inner.push(subscribeHistoricalDispositionIntents(historical, row => {
+            if (!alive(version)) return
+            const previous = runtime.dispositionIntentRows
+            const found = previous.find(e => e.id === row.id)
+            if (found && JSON.stringify(found) !== JSON.stringify(row))
+              runtime.dispositionIntentConflict = true
+            if (!found) {
+              if (previous.length >= MAX_HISTORICAL_DISPOSITION_INTENTS)
+                runtime.dispositionIntentConflict = true
+              else runtime.dispositionIntentRows = [...previous, row]
+            }
+            setReport(old => old ? { ...old,
+              dispositionIntentRows: runtime.dispositionIntentRows,
+              dispositionIntentConflict: runtime.dispositionIntentConflict } : old)
+          }, (ready, audit) => {
+            if (!alive(version)) return
+            runtime.dispositionIntentsChecked = ready
+            runtime.dispositionIntentAudit = audit
+            setReport(old => old ? { ...old, dispositionIntentAudit: audit } : old)
+          }))
           show('Accesso archivio verificato. Ricostruzione in sola lettura…')
           inner.push(subscribeHistoricalReconciliations(historical, row => {
             if (!alive(version)) return
@@ -314,6 +344,54 @@ export default function FormerMemberAuditView({ pubkey }) {
     finally { reconSigning.current = false; setReconBusy(false) }
   }
 
+  const signDispositionIntent = async mode => {
+    if (intentSigning.current) return
+    intentSigning.current = true
+    try {
+      const runtime = active.current
+      if (!runtime || runtime.account !== pubkey || !runtime.eligible ||
+          !runtime.historyChecked || runtime.overflow || runtime.priorEvidenceOverflow ||
+          runtime.reconciliationConflict || runtime.dispositionIntentConflict ||
+          !runtime.dispositionIntentsChecked || pendingOutbox(pubkey).length ||
+          !historicalDispositionIntentReady(runtime.relayAudit,
+            runtime.reconciliationDecisionAudit, runtime.dispositionIntentAudit))
+        throw new Error('Verifica delle firme e dei relay non completata')
+      const group = runtime.group, snapshot = runtime.snapshot
+      const checkpoint = runtime.reconciliationCheckpoint
+      const events = runtime.events, rows = runtime.reconciliationRows
+      const intents = runtime.dispositionIntentRows
+      const sourceAudit = runtime.relayAudit, decisionAudit = runtime.reconciliationDecisionAudit
+      const intentAudit = runtime.dispositionIntentAudit
+      const preview = await buildHistoricalDispositionDrafts({ group, snapshot, checkpoint,
+        reconciliations: rows, sourceAudit, decisionAudit,
+        conflict: runtime.reconciliationConflict })
+      if (preview.status !== 'ready-for-review' || active.current !== runtime ||
+          runtime.group !== group || runtime.snapshot !== snapshot ||
+          runtime.reconciliationCheckpoint !== checkpoint || runtime.events !== events ||
+          runtime.reconciliationRows !== rows || runtime.dispositionIntentRows !== intents ||
+          runtime.relayAudit !== sourceAudit ||
+          runtime.reconciliationDecisionAudit !== decisionAudit ||
+          runtime.dispositionIntentAudit !== intentAudit || !runtime.dispositionIntentsChecked ||
+          runtime.dispositionIntentConflict)
+        throw new Error('Bozza cambiata durante la firma')
+      const draft = preview.drafts.find(d => d.mode === mode)
+      const summary = historicalDispositionIntentSummary(group, preview.drafts, checkpoint, intents)
+      if (!draft || summary.status !== 'pending' || !summary.pending.includes(pubkey))
+        throw new Error('Preferenza gia espressa o in conflitto')
+      const signed = await publishEvent(pubkey, KIND_HISTORICAL_DISPOSITION_INTENT,
+        { version: 1, action: 'review-historical-disposition-v1', groupId: group.id,
+          revisionEventId: group._revisionId, checkpointHash: checkpoint.hash,
+          mode, draftHash: draft.draftHash },
+        historicalDispositionIntentTags(group, draft, preview.drafts[0].historicalNet.map(row => row[0])))
+      if (active.current !== runtime || runtime.group?._revisionId !== group._revisionId) return
+      const parsed = parseHistoricalDispositionIntentEvent(signed, group)
+      if (!parsed) throw new Error('Firma da recuperare tramite outbox')
+      if (!runtime.dispositionIntentRows.some(row => row.id === parsed.id))
+        runtime.dispositionIntentRows = [...runtime.dispositionIntentRows, parsed]
+      setReport(old => old ? { ...old, dispositionIntentRows: runtime.dispositionIntentRows } : old)
+    } finally { intentSigning.current = false }
+  }
+
   return <section style={{ padding: 16, ...code }}>
     <strong style={{ fontFamily: 'var(--pixel)', fontSize: 10 }}>ARCHIVIO EX MEMBRI</strong>
     <p>Solo verifica e attestazione degli eventi Nostr osservati. Nessuna spesa, saldo pagabile o trasferimento Lightning è disponibile qui.</p>
@@ -354,7 +432,11 @@ export default function FormerMemberAuditView({ pubkey }) {
         rows={report.reconciliationRows || []}
         sourceAudit={report.relayAudit}
         decisionAudit={report.reconciliationDecisionAudit}
-        conflict={!!report.reconciliationConflict} account={pubkey} />}
+        conflict={!!report.reconciliationConflict} account={pubkey}
+        intentRows={report.dispositionIntentRows || []}
+        intentAudit={report.dispositionIntentAudit}
+        intentConflict={!!report.dispositionIntentConflict}
+        onSign={signDispositionIntent} auditOnly />}
       {error && <p role="alert" style={{ color: 'var(--red)' }}>{error}</p>}
     </div>}
     <p style={{ color: 'var(--red)' }}>EOSE non dimostra che lo storico sia completo. Una firma non prova il pagamento e non libera nessuno da un debito.</p>

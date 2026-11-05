@@ -39,6 +39,7 @@ export default function App() {
   const cancelDisputedExpense = useStore(s => s.cancelDisputedExpense)
   const attestHistoricalSnapshot = useStore(s => s.attestHistoricalSnapshot)
   const signHistoricalReconciliation = useStore(s => s.signHistoricalReconciliation)
+  const signHistoricalDispositionIntent = useStore(s => s.signHistoricalDispositionIntent)
 
   // Revalidate the cached identity with the active NIP-07 signer before displaying data.
   useEffect(() => { restoreSession() }, [restoreSession])
@@ -169,6 +170,7 @@ export default function App() {
           onCancelExpense={(expenseEventId) => cancelDisputedExpense(groupAddress(liveGroup), expenseEventId)}
           onAttestHistorical={() => attestHistoricalSnapshot(groupAddress(liveGroup))}
           onSignReconciliation={() => signHistoricalReconciliation(groupAddress(liveGroup))}
+          onSignDispositionIntent={mode => signHistoricalDispositionIntent(groupAddress(liveGroup), mode)}
         />
       ) : (
         <>
