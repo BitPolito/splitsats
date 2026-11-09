@@ -2,6 +2,7 @@ import { assessFinancialMigrationPreflight } from '../lib/financial-migration-pr
 import { pendingOutbox } from '../lib/nostr'
 import { canReviewFinancialMigration, financialMigrationReviewSummary } from '../lib/financial-migration-intents'
 import { assessFinancialClientCutoverBarrier } from '../lib/financial-client-compatibility'
+import FinancialNamespacePlanningPreview from './FinancialNamespacePlanningPreview'
 import { useState } from 'react'
 
 // Signed non-effective review: publication is visible on public Nostr relays.
@@ -66,6 +67,7 @@ export default function FinancialMigrationReadiness({ group, account, onSignRevi
       </button>
     </>}
     {error && <p role="alert">{error}</p>}
+    <FinancialNamespacePlanningPreview group={group} account={account} />
     <p>La migrazione richiederà un nuovo protocollo firmato da tutti i membri,
       verifica dei vecchi client e revisione separata della sicurezza Lightning.</p>
   </details>
