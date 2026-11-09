@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { pendingOutbox, subscribeOutbox } from '../lib/nostr'
 import { buildFinancialNamespacePlan } from '../lib/financial-namespace-plan'
+import { buildFinancialDestinationDraft } from '../lib/financial-destination-consent'
 
 // Read-only planning evidence. Never put this fingerprint into publication,
 // payment routing, balance computation or a "migration complete" indicator.
@@ -26,12 +27,16 @@ export default function FinancialNamespacePlanningPreview({ group, account }) {
     let active = true
     let entries = null
     try { if (account) entries = pendingOutbox(account) } catch { /* deny */ }
-    void buildFinancialNamespacePlan(group, { outboxEntries: entries })
-      .then(plan => { if (active) setResult({ key, plan }) })
-      .catch(() => { if (active) setResult({ key, plan: null }) })
+    void Promise.all([
+      buildFinancialNamespacePlan(group, { outboxEntries: entries }),
+      buildFinancialDestinationDraft(group, { outboxEntries: entries }),
+    ]).then(([plan, destination]) => {
+      if (active) setResult({ key, plan, destination })
+    }).catch(() => { if (active) setResult({ key, plan: null, destination: null }) })
     return () => { active = false }
   }, [group, account, key])
   const plan = result?.key === key ? result.plan : null
+  const destination = result?.key === key ? result.destination : null
   return <section aria-label="Anteprima namespace finanziario v2"
     style={{ borderTop: '1px solid var(--blue)', paddingTop: 8 }}>
     <strong>3B-F · NUOVO NAMESPACE — SOLO ANTEPRIMA LOCALE</strong>
@@ -42,6 +47,15 @@ export default function FinancialNamespacePlanningPreview({ group, account }) {
       <span> (non è un indirizzo Nostr né una prova di migrazione)</span>
     </p>}
     {plan?.reasons?.length > 0 && <p>Limiti: {plan.reasons.join(', ')}</p>}
+    {destination?.status === 'specific-target-review-only' && <section
+      aria-label="Proposta di destinazione finanziaria non attiva"
+      style={{ borderTop: '1px solid var(--blue)', marginTop: 8, paddingTop: 8 }}>
+      <strong>3B-G · DESTINAZIONE ESATTA — SOLA PROPOSTA</strong>
+      <p>Gruppo futuro ipotizzato: <code>{destination.targetGroupAddress}</code></p>
+      <p>Impronta proposta: <code>{destination.proposalHash.slice(0, 20)}…</code>.
+        Nessun gruppo è stato creato, nessuna firma 9604 pubblicata,
+        nessun saldo trasferito o pagabile.</p>
+    </section>}
     <p>Writer 9600–9602: <strong>DISABILITATI</strong>.
       Nessun debito importato, pagamento abilitato o vecchio gruppo ritirato.</p>
   </section>
