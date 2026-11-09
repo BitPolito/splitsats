@@ -4,6 +4,7 @@
 // approves exactly the proposal that their Nostr key signed.
 import { groupAddress } from './group-history.js'
 import { KIND_EXPENSE_DECISION } from './constants.js'
+import { isReadableSplitSatsSchema } from './protocol-schema.js'
 import { expenseCancellationSummary } from './expense-cancellations.js'
 
 export const EXPENSE_POLICY = 'unanimous-expense-v1'
@@ -41,6 +42,7 @@ export function parseExpenseDecisionEvent(event, group) {
   let data
   try { data = JSON.parse(event.content) } catch { return null }
   if (!data || typeof data !== 'object' || Array.isArray(data) ||
+      !isReadableSplitSatsSchema(event.kind, data) ||
       !HASH.test(data.expenseEventId || '') || !HASH.test(data.expenseAuthor || '') ||
       data.groupId !== group.id || data.revisionEventId !== group._revisionId ||
       !['approve', 'dispute'].includes(data.decision) ||

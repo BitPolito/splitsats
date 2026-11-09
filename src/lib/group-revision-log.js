@@ -3,6 +3,7 @@
 // Missing/ambiguous history fails closed. The relay is not a source of finality.
 import { groupAddress } from './group-history.js'
 import { KIND_GROUP_REVISION } from './constants.js'
+import { isReadableSplitSatsSchema } from './protocol-schema.js'
 import { EXPENSE_POLICY } from './expense-approvals.js'
 
 export { KIND_GROUP_REVISION }
@@ -28,6 +29,7 @@ export function parseGroupRevisionEvent(event, group) {
   let content
   try { content = JSON.parse(event.content) } catch { return null }
   if (!content || typeof content !== 'object' || Array.isArray(content) ||
+      !isReadableSplitSatsSchema(event.kind, content) ||
       content.groupId !== group.id || !Number.isSafeInteger(content.version) ||
       content.version < 0 || content.version > 100 ||
       !validMemberList(content.members) || !content.members.includes(group.pubkey) ||
