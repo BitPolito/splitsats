@@ -55,7 +55,8 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
   }
 
   const locked = Boolean(group._revisionId &&
-    (group._revisionStatus !== 'verified' || group._financialReviewRequired)) || inviteLocked || !!group._expenseReviewRequired
+    (group._revisionStatus !== 'verified' || group._financialReviewRequired)) || inviteLocked ||
+    !!group._expenseReviewRequired || !!group._financialMigrationQuarantine
   // Never render an incomplete ledger as if everybody were settled.
   const expenses = locked ? [] : (group.expenses || [])
   const settlements = locked ? [] : (group.settlements || [])
@@ -92,6 +93,17 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
         </div>
       </div>
 
+      {group._financialMigrationQuarantine && <section role="alert" style={{
+        padding: '12px 16px', borderBottom: '2px solid var(--red)',
+        fontFamily: 'var(--mono)', fontSize: 11, lineHeight: 1.7 }}>
+        <strong>MIGRAZIONE NOSTR — QUARANTENA FINANZIARIA</strong>
+        <p>Osservati eventi v2, ID duplicati o differenze fra relay.
+          Operazioni e saldi bloccati: verificare manualmente gli eventi firmati.</p>
+        <div>Cause: {(group._financialNamespaceRisk?.reasons || []).join(', ')}</div>
+        {(group._financialNamespaceRisk?.sampleEventIds || []).map(id =>
+          <div key={id}>Evento: <code>{id}</code></div>)}
+        <p>Non è stato applicato alcun evento v2 al registro e nessun debito è stato estinto.</p>
+      </section>}
       {locked && (
         <div role="alert" style={{ padding: '10px 16px', borderBottom: '2px solid var(--red)',
           color: 'var(--red)', fontFamily: 'var(--mono)', fontSize: 11 }}>

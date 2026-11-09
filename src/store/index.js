@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { saveGroups, loadProfiles, saveProfiles, loadPubkey, savePubkey, clearAll, clearPubkey } from '../lib/storage'
 import { verifyCachedSigner } from '../lib/session-identity'
-import { publishEvent, fetchProfile, fetchGroups, subscribeGroupRevisions, subscribeGroupInvitations, subscribeExpenseDecisions, subscribeExpenseCancellations, subscribePriorRevisionActivity, subscribeMemberExitRequests, subscribeHistoricalAttestations, subscribeHistoricalReconciliations, subscribeHistoricalDispositionIntents, pendingOutbox, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
+import { publishEvent, fetchProfile, fetchGroups, subscribeGroupRevisions, subscribeGroupInvitations, subscribeExpenseDecisions, subscribeExpenseCancellations, subscribePriorRevisionActivity, subscribeMemberExitRequests, subscribeHistoricalAttestations, subscribeHistoricalReconciliations, subscribeHistoricalDispositionIntents, subscribeFinancialKindAudit, pendingOutbox, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
 import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION, KIND_GROUP_REVISION, KIND_GROUP_INVITATION, KIND_EXPENSE_DECISION, KIND_EXPENSE_CANCELLATION, KIND_MEMBER_EXIT, KIND_HISTORICAL_ATTESTATION, KIND_HISTORICAL_RECONCILIATION, KIND_HISTORICAL_DISPOSITION_INTENT } from '../lib/constants'
 import { validPubkey } from '../lib/event-validation'
 import { groupAddress } from '../lib/group-history'
@@ -147,6 +147,8 @@ export const useStore = create((set, get) => ({
           delete activeSubs['historic_recon_' + ref]
           activeSubs['historic_disposition_' + ref]?.()
           delete activeSubs['historic_disposition_' + ref]
+          activeSubs['finance_guard_' + ref]?.()
+          delete activeSubs['finance_guard_' + ref]
           activeSubs['rev_' + ref]?.()
           const head = live._revisionId
           const received = new Map()
@@ -174,6 +176,7 @@ export const useStore = create((set, get) => ({
                       _reconciliationCheckpoint: null, _reconciliationRows: [],
                       _reconciliationConflict: false, _reconciliationDecisionsChecked: false,
                       _reconciliationDecisionAudit: null,
+                      _financialMigrationQuarantine: false, _financialNamespaceRisk: null,
                       _dispositionIntentRows: [], _dispositionIntentConflict: false,
                       _dispositionIntentAudit: null, _dispositionIntentsChecked: false,
                       _memberExitRequests: [], _memberExitStatus: result.removedMembers.length ? 'pending' : 'none',
@@ -195,6 +198,7 @@ export const useStore = create((set, get) => ({
               get().watchHistoricalAttestations(ref)
               get().watchHistoricalReconciliations(ref)
               get().watchHistoricalDispositionIntents(ref)
+              get().watchFinancialKindMigration(ref)
               // Even a seemingly empty current ledger may hide historical
               // transactions: watch old heads independently of new consent.
               if (result.chain.length > 1 && !activeSubs['prior_' + ref]) {
@@ -243,6 +247,48 @@ export const useStore = create((set, get) => ({
         })
       }
     )
+  },
+
+  // 3B-B: watch current-head legacy and v2 financial evidence without
+  // importing v2 into the ledger. Observation is per signed group/revision.
+  watchFinancialKindMigration: (ref) => {
+    const group = get().getGroup(ref), account = get().pubkey
+    if (!account || currentSessionPubkey !== account ||
+        !group?.members?.includes(account) || group._revisionStatus !== 'verified' ||
+        !group._revisionId || group._financialMigrationQuarantine ||
+        activeSubs['finance_guard_' + ref]) return
+    const head = group._revisionId
+    activeSubs['finance_guard_' + ref] = subscribeFinancialKindAudit(group, report => {
+      if (get().pubkey !== account || currentSessionPubkey !== account ||
+          get().getGroup(ref)?._revisionId !== head) return
+      get().quarantineFinancialKindMigration(ref, head, report)
+    })
+  },
+
+  quarantineFinancialKindMigration: (ref, head, report) => {
+    const account = get().pubkey, group = get().getGroup(ref)
+    if (!account || currentSessionPubkey !== account || !group ||
+        group._revisionId !== head || report?.status !== 'quarantine' ||
+        !Array.isArray(report.reasons) || !report.reasons.length ||
+        report.safeForPayments !== false || report.completeHistory !== false) return
+    set(s => {
+      const groups = s.groups.map(g => groupAddress(g) === ref && g._revisionId === head
+        ? { ...g, _financialMigrationQuarantine: true,
+            _financialNamespaceRisk: { reasons: report.reasons.slice(0, 12),
+              sampleEventIds: (report.sampleEventIds || []).slice(0, 8) },
+            _financialReviewRequired: true, _expenseReviewRequired: true,
+            _financialHistoryChecked: false, proposedExpenses: [],
+            expenses: [], settlements: [], confirmations: [] } : g)
+      saveGroups(account, groups)
+      return { groups }
+    })
+    // Unsubscribe old financial streams immediately. No future callback can
+    // resurrect an account balance after quarantine.
+    for (const prefix of ['exp_', 'set_', 'conf_', 'approval_', 'cancel_']) {
+      activeSubs[prefix + ref]?.()
+      delete activeSubs[prefix + ref]
+    }
+    delete subscribedMemberKeys[ref]
   },
 
   // ─── PHASE 2E-C-A: SIGNED HISTORICAL SNAPSHOT ATTESTATIONS ────────────────
@@ -1042,7 +1088,7 @@ export const useStore = create((set, get) => ({
       return { groups: next, toast: 'Membro aggiunto: in attesa di nuovi consensi Nostr' }
     })
     // Stop listeners for the old head and listen for fresh signed consents.
-    for (const kind of ['exp_', 'set_', 'conf_', 'approval_', 'cancel_', 'inv_', 'rev_', 'prior_', 'leave_', 'historic_attest_']) {
+    for (const kind of ['exp_', 'set_', 'conf_', 'approval_', 'cancel_', 'inv_', 'rev_', 'prior_', 'leave_', 'historic_attest_', 'finance_guard_']) {
       activeSubs[kind + ref]?.()
       delete activeSubs[kind + ref]
     }
@@ -1117,7 +1163,7 @@ export const useStore = create((set, get) => ({
       saveGroups(account, groups)
       return { groups, toast: 'Uscita registrata: in attesa dei nuovi consensi' }
     })
-    for (const prefix of ['exp_', 'set_', 'conf_', 'approval_', 'cancel_', 'inv_', 'rev_', 'prior_', 'leave_', 'historic_attest_']) {
+    for (const prefix of ['exp_', 'set_', 'conf_', 'approval_', 'cancel_', 'inv_', 'rev_', 'prior_', 'leave_', 'historic_attest_', 'finance_guard_']) {
       activeSubs[prefix + ref]?.()
       delete activeSubs[prefix + ref]
     }
