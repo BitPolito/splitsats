@@ -13,6 +13,11 @@ export const KIND_GROUP      = 30001  // Addressable event: group definition
 export const KIND_EXPENSE    = 9000   // Expense event
 export const KIND_SETTLEMENT = 9001  // Debtor settlement CLAIM (pending until payee confirms)
 export const KIND_CONFIRMATION = 9002  // Payee signed receipt confirmation
+// Phase 3B-A: provisional collision-avoiding regular kinds (PARSER-ONLY).
+// Legacy 9000-9002 are immutable; writers keep emitting legacy until 3B-C.
+export const KIND_EXPENSE_V2 = 9600
+export const KIND_SETTLEMENT_V2 = 9601
+export const KIND_CONFIRMATION_V2 = 9602
 export const KIND_GROUP_REVISION = 9591 // Immutable owner-signed membership revision
 export const KIND_GROUP_INVITATION = 9592 // Invitee-signed consent decision
 export const KIND_EXPENSE_DECISION = 9593 // Participant-signed expense approval or dispute

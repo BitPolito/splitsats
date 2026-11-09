@@ -1,4 +1,5 @@
-import { matchesGroupAddressTag } from './group-history.js'
+import { matchesGroupAddressTag, groupAddress } from './group-history.js'
+import { KIND_EXPENSE_V2, KIND_SETTLEMENT_V2, KIND_CONFIRMATION_V2 } from './constants.js'
 import { isReadableSplitSatsSchema } from './protocol-schema.js'
 
 // Validate application-level authorization and payloads AFTER the relay event's
@@ -26,7 +27,8 @@ function hasSingleTag(event, tag, value) {
 }
 
 function isValidEnvelope(event, kind) {
-  return event && event.kind === kind && HEX_EVENT.test(event.id || '') &&
+  return event && (Array.isArray(kind) ? kind.includes(event.kind) : event.kind === kind) &&
+    HEX_EVENT.test(event.id || '') &&
     validPubkey(event.pubkey) && Number.isSafeInteger(event.created_at) &&
     event.created_at > 0 && event.created_at <= Math.floor(Date.now() / 1000) + MAX_FUTURE_SECONDS &&
     hasSingleTag(event, 't', 'splitsats') && typeof event.content === 'string'
@@ -35,6 +37,20 @@ function isValidEnvelope(event, kind) {
 function readObject(content, kind) {
   try { const value = JSON.parse(content); return plainObject(value) &&
     isReadableSplitSatsSchema(kind, value) ? value : null } catch { return null }
+}
+
+// Future v2 wire shapes MUST be signed, revision-scoped, and distinct from
+// NIP-29 moderation. This function never upgrades a legacy event in place.
+function validFinancialV2(event, group, data, v2Kind, expectedAction) {
+  if (event.kind !== v2Kind) return true // Existing signed 9000-9002 compatibility
+  if (!data || data.schemaVersion !== 2 || data.action !== expectedAction ||
+      Object.prototype.hasOwnProperty.call(data, 'version') ||
+      !HEX_EVENT.test(group?._revisionId || '') ||
+      event.tags?.some(t => t[0] === 'h')) return false
+  const address = groupAddress(group)
+  return !!address && hasSingleTag(event, 'a', address) &&
+    hasSingleTag(event, 'r', group._revisionId) &&
+    hasSingleTag(event, 'v', '2')
 }
 
 function validMembers(members) {
@@ -92,10 +108,11 @@ function validGroup(group) {
 }
 
 export function parseExpenseEvent(event, group) {
-  if (!isValidEnvelope(event, 9000) || !validGroup(group) ||
+  if (!isValidEnvelope(event, [9000, KIND_EXPENSE_V2]) || !validGroup(group) ||
       !hasSingleTag(event, 'g', group.id) || !matchesGroupAddressTag(event, group) ||
       !group.members.includes(event.pubkey)) return null
   const data = readObject(event.content, event.kind)
+  if (!validFinancialV2(event, group, data, KIND_EXPENSE_V2, 'expense-v2')) return null
   if (!data || !nonemptyString(data.id, 128) || !nonemptyString(data.description, 500) ||
       !positiveSats(data.amount) || !group.members.includes(data.paidBy) ||
       !Array.isArray(data.splits) || data.splits.length === 0 ||
@@ -111,9 +128,10 @@ export function parseExpenseEvent(event, group) {
 }
 
 export function parseSettlementEvent(event, group) {
-  if (!isValidEnvelope(event, 9001) || !validGroup(group) ||
+  if (!isValidEnvelope(event, [9001, KIND_SETTLEMENT_V2]) || !validGroup(group) ||
       !hasSingleTag(event, 'g', group.id) || !matchesGroupAddressTag(event, group)) return null
   const data = readObject(event.content, event.kind)
+  if (!validFinancialV2(event, group, data, KIND_SETTLEMENT_V2, 'settlement-claim-v2')) return null
   // Only the debtor can attest to sending a payment. This is still NOT a
   // cryptographic proof that any Lightning transfer was completed.
   if (!data || event.pubkey !== data.from || !group.members.includes(data.from) ||
@@ -132,9 +150,10 @@ export function parseSettlementEvent(event, group) {
 // The receiver, NOT the payer, attests to receipt. Bind the confirmation to
 // the exact signed settlement event ID so a claim cannot be replaced later.
 export function parseConfirmationEvent(event, group) {
-  if (!isValidEnvelope(event, 9002) || !validGroup(group) ||
+  if (!isValidEnvelope(event, [9002, KIND_CONFIRMATION_V2]) || !validGroup(group) ||
       !hasSingleTag(event, 'g', group.id) || !matchesGroupAddressTag(event, group)) return null
   const data = readObject(event.content, event.kind)
+  if (!validFinancialV2(event, group, data, KIND_CONFIRMATION_V2, 'recipient-receipt-v2')) return null
   if (!data || !HEX_EVENT.test(data.settlementEventId || '') ||
       !validPubkey(data.from) || !validPubkey(data.to) || data.from === data.to ||
       !group.members.includes(data.from) || !group.members.includes(data.to) ||
