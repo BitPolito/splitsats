@@ -23,6 +23,8 @@ import { parseHistoricalDispositionIntentEvent } from './historical-disposition-
 import { FinancialKindQuarantine, MIXED_FINANCIAL_KINDS, liveFinancialRelayRiskReasons } from './financial-kind-quarantine'
 import { assertFinancialV2PublishingDisabled } from './financial-migration-preflight'
 import { KIND_EXPENSE_V2, KIND_SETTLEMENT_V2, KIND_CONFIRMATION_V2 } from './constants'
+import { KIND_FINANCIAL_MIGRATION_REVIEW } from './constants'
+import { parseFinancialMigrationReviewEvent, reportLiveFinancialMigrationReviewAudit } from './financial-migration-intents'
 
 // ─── npub ↔ hex conversion ────────────────────────────────────────────────────
 // Nostr relays always use hex pubkeys. npub is only a display format.
@@ -374,6 +376,38 @@ export function subscribeHistoricalDispositionIntents(group, onIntent, onAudit) 
   })
   notify()
   return stop
+}
+
+// Signed, non-executable financial migration review preferences (kind:9603).
+// Signatures are verified by RelayPool; all configured relays are audited
+// independently. Matching EOSE observations do NOT prove global completeness.
+export function subscribeFinancialMigrationReviews(group, onReview, onAudit, onInvalid) {
+  const address = groupAddress(group)
+  if (!address || group?._revisionStatus !== 'verified' ||
+      !group._revisionId || !Array.isArray(group.members))
+    throw new Error('Revisione della migrazione non verificata')
+  const audit = new RelaySnapshotAudit(RELAYS)
+  const notify = () => onAudit?.(reportLiveFinancialMigrationReviewAudit(audit))
+  const unsubscribe = pool.subscribe({
+    id: 'finance_migration_review_' + address,
+    filters: [{ kinds: [KIND_FINANCIAL_MIGRATION_REVIEW],
+      authors: [...new Set(group.members)], '#a': [address],
+      '#g': [group.id], '#r': [group._revisionId], limit: 500 }],
+    onEvent: event => {
+      const parsed = parseFinancialMigrationReviewEvent(event, group)
+      if (parsed) onReview?.(parsed)
+      else onInvalid?.(event.id)
+    },
+    onRelayEvent: (event, relay) => {
+      const before = reportLiveFinancialMigrationReviewAudit(audit).status
+      audit.record(relay, event)
+      if (reportLiveFinancialMigrationReviewAudit(audit).status !== before) notify()
+    },
+    onRelayEose: relay => { audit.eose(relay); notify() },
+    onRelayReset: (relay, reason) => { audit.reset(relay, reason); notify() },
+  })
+  notify()
+  return unsubscribe
 }
 
 // Voluntary leave requests stay retrievable by current members even after

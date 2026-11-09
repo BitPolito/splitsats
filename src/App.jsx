@@ -40,6 +40,7 @@ export default function App() {
   const attestHistoricalSnapshot = useStore(s => s.attestHistoricalSnapshot)
   const signHistoricalReconciliation = useStore(s => s.signHistoricalReconciliation)
   const signHistoricalDispositionIntent = useStore(s => s.signHistoricalDispositionIntent)
+  const signFinancialMigrationReview = useStore(s => s.signFinancialMigrationReview)
 
   // Revalidate the cached identity with the active NIP-07 signer before displaying data.
   useEffect(() => { restoreSession() }, [restoreSession])
@@ -171,6 +172,7 @@ export default function App() {
           onAttestHistorical={() => attestHistoricalSnapshot(groupAddress(liveGroup))}
           onSignReconciliation={() => signHistoricalReconciliation(groupAddress(liveGroup))}
           onSignDispositionIntent={mode => signHistoricalDispositionIntent(groupAddress(liveGroup), mode)}
+          onSignMigrationReview={choice => signFinancialMigrationReview(groupAddress(liveGroup), choice)}
         />
       ) : (
         <>

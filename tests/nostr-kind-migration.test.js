@@ -36,8 +36,11 @@ test('v2 kind assignments are distinct and outside NIP-29 moderation kinds',()=>
   assert.deepEqual([KIND_EXPENSE,KIND_SETTLEMENT,KIND_CONFIRMATION],[9000,9001,9002])
 })
 test('v2 kinds are registered with v2-only schema admission',()=>{
-  assert.equal(SPLITSATS_PROTOCOL_KINDS.length,15)
-  assert.equal(new Set(SPLITSATS_PROTOCOL_KINDS.map(e=>e.kind)).size,15)
+  assert.equal(SPLITSATS_PROTOCOL_KINDS.length,16)
+  assert.equal(new Set(SPLITSATS_PROTOCOL_KINDS.map(e=>e.kind)).size,16)
+  assert.equal(inspectSplitSatsSchema(9603,{version:1}).status,'native-v1')
+  assert.equal(isReadableSplitSatsSchema(9603,{version:2}),false)
+  assert.equal(isReadableSplitSatsSchema(9603,{version:1,schemaVersion:1}),false)
   for(const kind of [9600,9601,9602]) {
     assert.equal(inspectSplitSatsSchema(kind,{schemaVersion:2}).status,'schema-v2')
     for(const payload of [{},{schemaVersion:1},{schemaVersion:'2'},{schemaVersion:3},

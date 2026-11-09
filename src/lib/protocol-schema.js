@@ -5,7 +5,7 @@
 
 import {
   KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION,
-  KIND_EXPENSE_V2, KIND_SETTLEMENT_V2, KIND_CONFIRMATION_V2,
+  KIND_EXPENSE_V2, KIND_SETTLEMENT_V2, KIND_CONFIRMATION_V2, KIND_FINANCIAL_MIGRATION_REVIEW,
   KIND_GROUP_REVISION, KIND_GROUP_INVITATION, KIND_EXPENSE_DECISION,
   KIND_EXPENSE_CANCELLATION, KIND_MEMBER_EXIT,
   KIND_HISTORICAL_ATTESTATION, KIND_HISTORICAL_RECONCILIATION,
@@ -28,6 +28,7 @@ export const SPLITSATS_PROTOCOL_KINDS = Object.freeze([
   entry(KIND_EXPENSE_V2, 'expense-v2', 'schema-v2'),
   entry(KIND_SETTLEMENT_V2, 'settlement-claim-v2', 'schema-v2'),
   entry(KIND_CONFIRMATION_V2, 'recipient-receipt-v2', 'schema-v2'),
+  entry(KIND_FINANCIAL_MIGRATION_REVIEW, 'financial-migration-review', 'action-v1'),
   entry(KIND_GROUP_REVISION, 'membership-revision', 'revision-counter'),
   entry(KIND_GROUP_INVITATION, 'invitation-decision', 'none'),
   entry(KIND_EXPENSE_DECISION, 'expense-decision', 'none'),
