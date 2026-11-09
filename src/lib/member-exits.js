@@ -4,6 +4,7 @@
 // NOTE: Nostr relay EOSE is NOT a proof that financial history is complete.
 import { groupAddress } from './group-history.js'
 import { KIND_MEMBER_EXIT } from './constants.js'
+import { isReadableSplitSatsSchema } from './protocol-schema.js'
 
 const KEY = /^[0-9a-f]{64}$/
 const time = () => Math.floor(Date.now() / 1000)
@@ -39,6 +40,7 @@ export function parseMemberExitRequestEvent(event, group) {
   let data
   try { data = JSON.parse(event.content) } catch { return null }
   if (!data || typeof data !== 'object' || Array.isArray(data) ||
+      !isReadableSplitSatsSchema(event.kind, data) ||
       data.action !== 'leave' || data.groupId !== group.id ||
       !KEY.test(data.revisionEventId || '') ||
       !one(event, 'r', data.revisionEventId)) return null

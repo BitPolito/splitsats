@@ -3,6 +3,7 @@
 // remain independently auditable. Signature verification happens in RelayPool.
 import { groupAddress } from './group-history.js'
 import { KIND_EXPENSE_CANCELLATION } from './constants.js'
+import { isReadableSplitSatsSchema } from './protocol-schema.js'
 
 const HASH = /^[0-9a-f]{64}$/
 const now = () => Math.floor(Date.now() / 1000)
@@ -48,6 +49,7 @@ export function parseExpenseCancellationEvent(event, group) {
   let data
   try { data = JSON.parse(event.content) } catch { return null }
   if (!data || typeof data !== 'object' || Array.isArray(data) ||
+      !isReadableSplitSatsSchema(event.kind, data) ||
       data.action !== 'cancel' || data.groupId !== group.id ||
       data.revisionEventId !== group._revisionId ||
       !HASH.test(data.expenseEventId || '') ||

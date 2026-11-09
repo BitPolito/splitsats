@@ -2,6 +2,7 @@
 // The caller must feed parseInvitationDecisionEvent() signature-verified Nostr events.
 import { groupAddress } from './group-history.js'
 import { KIND_GROUP_INVITATION } from './constants.js'
+import { isReadableSplitSatsSchema } from './protocol-schema.js'
 
 export const CONSENT_POLICY = 'signed-invites-v1'
 const HASH = /^[0-9a-f]{64}$/
@@ -43,6 +44,7 @@ export function parseInvitationDecisionEvent(event, group) {
   let data
   try { data = JSON.parse(event.content) } catch { return null }
   if (!data || typeof data !== 'object' || Array.isArray(data) ||
+      !isReadableSplitSatsSchema(event.kind, data) ||
       data.groupId !== group.id || data.revisionEventId !== group._revisionId ||
       !['accept', 'decline'].includes(data.decision)) return null
   return { id: event.id, member: event.pubkey, decision: data.decision,

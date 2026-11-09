@@ -1,4 +1,5 @@
 import { matchesGroupAddressTag } from './group-history.js'
+import { isReadableSplitSatsSchema } from './protocol-schema.js'
 
 // Validate application-level authorization and payloads AFTER the relay event's
 // Nostr signature has been checked. An authentic signature does not mean that
@@ -31,8 +32,9 @@ function isValidEnvelope(event, kind) {
     hasSingleTag(event, 't', 'splitsats') && typeof event.content === 'string'
 }
 
-function readObject(content) {
-  try { const value = JSON.parse(content); return plainObject(value) ? value : null } catch { return null }
+function readObject(content, kind) {
+  try { const value = JSON.parse(content); return plainObject(value) &&
+    isReadableSplitSatsSchema(kind, value) ? value : null } catch { return null }
 }
 
 function validMembers(members) {
@@ -51,7 +53,7 @@ export function parseGroupEvent(event, viewerPubkey, normalizeMember = value => 
   if (!isValidEnvelope(event, 30001) || !validPubkey(viewerPubkey)) return null
   const d = taggedValues(event, 'd')
   if (!d || d.length !== 1 || !nonemptyString(d[0], 128)) return null
-  const data = readObject(event.content)
+  const data = readObject(event.content, event.kind)
   if (!data || !nonemptyString(data.name, 100) || !Array.isArray(data.members)) return null
   let members
   try { members = data.members.map(normalizeMember) } catch { return null }
@@ -93,7 +95,7 @@ export function parseExpenseEvent(event, group) {
   if (!isValidEnvelope(event, 9000) || !validGroup(group) ||
       !hasSingleTag(event, 'g', group.id) || !matchesGroupAddressTag(event, group) ||
       !group.members.includes(event.pubkey)) return null
-  const data = readObject(event.content)
+  const data = readObject(event.content, event.kind)
   if (!data || !nonemptyString(data.id, 128) || !nonemptyString(data.description, 500) ||
       !positiveSats(data.amount) || !group.members.includes(data.paidBy) ||
       !Array.isArray(data.splits) || data.splits.length === 0 ||
@@ -111,7 +113,7 @@ export function parseExpenseEvent(event, group) {
 export function parseSettlementEvent(event, group) {
   if (!isValidEnvelope(event, 9001) || !validGroup(group) ||
       !hasSingleTag(event, 'g', group.id) || !matchesGroupAddressTag(event, group)) return null
-  const data = readObject(event.content)
+  const data = readObject(event.content, event.kind)
   // Only the debtor can attest to sending a payment. This is still NOT a
   // cryptographic proof that any Lightning transfer was completed.
   if (!data || event.pubkey !== data.from || !group.members.includes(data.from) ||
@@ -132,7 +134,7 @@ export function parseSettlementEvent(event, group) {
 export function parseConfirmationEvent(event, group) {
   if (!isValidEnvelope(event, 9002) || !validGroup(group) ||
       !hasSingleTag(event, 'g', group.id) || !matchesGroupAddressTag(event, group)) return null
-  const data = readObject(event.content)
+  const data = readObject(event.content, event.kind)
   if (!data || !HEX_EVENT.test(data.settlementEventId || '') ||
       !validPubkey(data.from) || !validPubkey(data.to) || data.from === data.to ||
       !group.members.includes(data.from) || !group.members.includes(data.to) ||
