@@ -1,8 +1,8 @@
 import { create } from 'zustand'
 import { saveGroups, loadProfiles, saveProfiles, loadPubkey, savePubkey, clearAll, clearPubkey } from '../lib/storage'
 import { verifyCachedSigner } from '../lib/session-identity'
-import { publishEvent, fetchProfile, fetchGroups, subscribeGroupRevisions, subscribeGroupInvitations, subscribeExpenseDecisions, subscribeExpenseCancellations, subscribePriorRevisionActivity, subscribeMemberExitRequests, subscribeHistoricalAttestations, subscribeHistoricalReconciliations, subscribeHistoricalDispositionIntents, subscribeFinancialKindAudit, pendingOutbox, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
-import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION, KIND_GROUP_REVISION, KIND_GROUP_INVITATION, KIND_EXPENSE_DECISION, KIND_EXPENSE_CANCELLATION, KIND_MEMBER_EXIT, KIND_HISTORICAL_ATTESTATION, KIND_HISTORICAL_RECONCILIATION, KIND_HISTORICAL_DISPOSITION_INTENT } from '../lib/constants'
+import { publishEvent, fetchProfile, fetchGroups, subscribeGroupRevisions, subscribeGroupInvitations, subscribeExpenseDecisions, subscribeExpenseCancellations, subscribePriorRevisionActivity, subscribeMemberExitRequests, subscribeHistoricalAttestations, subscribeHistoricalReconciliations, subscribeHistoricalDispositionIntents, subscribeFinancialKindAudit, subscribeFinancialMigrationReviews, pendingOutbox, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
+import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION, KIND_GROUP_REVISION, KIND_GROUP_INVITATION, KIND_EXPENSE_DECISION, KIND_EXPENSE_CANCELLATION, KIND_MEMBER_EXIT, KIND_HISTORICAL_ATTESTATION, KIND_HISTORICAL_RECONCILIATION, KIND_HISTORICAL_DISPOSITION_INTENT, KIND_FINANCIAL_MIGRATION_REVIEW } from '../lib/constants'
 import { validPubkey } from '../lib/event-validation'
 import { groupAddress } from '../lib/group-history'
 import { parseGroupRevisionEvent, revisionTags, verifyGroupRevisionHistory, membersForRevisionEvent } from '../lib/group-revision-log'
@@ -24,6 +24,9 @@ import {
 import { buildHistoricalDispositionDrafts } from '../lib/historical-disposition'
 import { historicalDispositionIntentTags, parseHistoricalDispositionIntentEvent, historicalDispositionIntentSummary, historicalDispositionIntentReady, MAX_HISTORICAL_DISPOSITION_INTENTS } from '../lib/historical-disposition-intents'
 import { memberExitTags, parseMemberExitRequestEvent, verifyMemberExitProofs, assertCanRequestExit, assertCanFinalizeExit } from '../lib/member-exits'
+import { canReviewFinancialMigration, financialMigrationReviewTags, financialMigrationReviewContent,
+  parseFinancialMigrationReviewEvent, financialMigrationReviewSummary,
+  MAX_FINANCIAL_MIGRATION_REVIEWS } from '../lib/financial-migration-intents'
 import { expenseCancellationTags, parseExpenseCancellationEvent, expenseCancellationSummary } from '../lib/expense-cancellations'
 
 const randId = () => crypto.randomUUID()
@@ -33,6 +36,7 @@ const activeSubs = {}
 const subscribedMemberKeys = {}
 const inFlightReconciliations = new Set()
 const inFlightDispositionIntents = new Set()
+const inFlightMigrationReviews = new Set()
 let currentSessionPubkey = null
 
 function stopActiveSubscriptions() {
@@ -149,6 +153,8 @@ export const useStore = create((set, get) => ({
           delete activeSubs['historic_disposition_' + ref]
           activeSubs['finance_guard_' + ref]?.()
           delete activeSubs['finance_guard_' + ref]
+          activeSubs['migration_review_' + ref]?.()
+          delete activeSubs['migration_review_' + ref]
           activeSubs['rev_' + ref]?.()
           const head = live._revisionId
           const received = new Map()
@@ -177,6 +183,8 @@ export const useStore = create((set, get) => ({
                       _reconciliationConflict: false, _reconciliationDecisionsChecked: false,
                       _reconciliationDecisionAudit: null,
                       _financialMigrationQuarantine: false, _financialNamespaceRisk: null,
+                      _migrationReviewRows: [], _migrationReviewAudit: null,
+                      _migrationReviewConflict: false,
                       _dispositionIntentRows: [], _dispositionIntentConflict: false,
                       _dispositionIntentAudit: null, _dispositionIntentsChecked: false,
                       _memberExitRequests: [], _memberExitStatus: result.removedMembers.length ? 'pending' : 'none',
@@ -199,6 +207,7 @@ export const useStore = create((set, get) => ({
               get().watchHistoricalReconciliations(ref)
               get().watchHistoricalDispositionIntents(ref)
               get().watchFinancialKindMigration(ref)
+              get().watchFinancialMigrationReviews(ref)
               // Even a seemingly empty current ledger may hide historical
               // transactions: watch old heads independently of new consent.
               if (result.chain.length > 1 && !activeSubs['prior_' + ref]) {
@@ -289,6 +298,92 @@ export const useStore = create((set, get) => ({
       delete activeSubs[prefix + ref]
     }
     delete subscribedMemberKeys[ref]
+  },
+
+  // 3B-D: public signed preferences, never executable migration consent.
+  watchFinancialMigrationReviews: (ref) => {
+    const group = get().getGroup(ref), account = get().pubkey
+    if (!group || !account || currentSessionPubkey !== account ||
+        !group.members?.includes(account) || group._revisionStatus !== 'verified' ||
+        group._revisions?.length !== 1 || group._consentPolicy !== CONSENT_POLICY ||
+        activeSubs['migration_review_' + ref]) return
+    const head = group._revisionId
+    activeSubs['migration_review_' + ref] = subscribeFinancialMigrationReviews(group,
+      row => get().applyFinancialMigrationReview(ref, row),
+      audit => {
+        if (get().pubkey !== account || currentSessionPubkey !== account ||
+            get().getGroup(ref)?._revisionId !== head) return
+        set(s => ({ groups: s.groups.map(g =>
+          groupAddress(g) === ref && g._revisionId === head
+            ? { ...g, _migrationReviewAudit: audit, _migrationReviewConflict:
+                !!g._migrationReviewConflict || audit.status === 'conflict' ||
+                audit.status === 'overflow' || audit.status === 'at-limit' } : g) }))
+      },
+      () => {
+        if (get().pubkey !== account || currentSessionPubkey !== account ||
+            get().getGroup(ref)?._revisionId !== head) return
+        set(s => ({ groups: s.groups.map(g =>
+          groupAddress(g) === ref && g._revisionId === head
+            ? { ...g, _migrationReviewConflict: true } : g) }))
+      }
+    )
+  },
+
+  applyFinancialMigrationReview: (ref, row) => {
+    const group = get().getGroup(ref), account = get().pubkey
+    if (!account || currentSessionPubkey !== account ||
+        !group || group._revisionId !== row?.revisionEventId) return
+    set(s => {
+      const groups = s.groups.map(g => {
+        if (groupAddress(g) !== ref || g._revisionId !== row.revisionEventId) return g
+        const existing = g._migrationReviewRows || []
+        const previous = existing.find(x => x.id === row.id)
+        if (previous) return JSON.stringify(previous) === JSON.stringify(row) ? g :
+          { ...g, _migrationReviewConflict: true }
+        if (existing.length >= MAX_FINANCIAL_MIGRATION_REVIEWS)
+          return { ...g, _migrationReviewConflict: true }
+        const rows = [...existing, row]
+        const summary = financialMigrationReviewSummary(g, rows, g._migrationReviewAudit)
+        return { ...g, _migrationReviewRows: rows,
+          _migrationReviewConflict: !!g._migrationReviewConflict || summary.status === 'conflict' }
+      })
+      saveGroups(account, groups)
+      return { groups }
+    })
+  },
+
+  signFinancialMigrationReview: async (ref, choice) => {
+    const account = get().pubkey, group = get().getGroup(ref)
+    if (!account || currentSessionPubkey !== account || !group ||
+        !group.members?.includes(account) || group._migrationReviewConflict ||
+        group._migrationReviewAudit?.status !== 'matching-observed' ||
+        !canReviewFinancialMigration(group, pendingOutbox(account)))
+      throw new Error('Revisione migrazione non verificata o outbox non vuota')
+    const summary = financialMigrationReviewSummary(group,
+      group._migrationReviewRows || [], group._migrationReviewAudit,
+      group._migrationReviewConflict)
+    if (summary.status !== 'pending' || !summary.pending.includes(account))
+      throw new Error('Preferenza gia presente, conflitto o migrazione non disponibile')
+    const flight = `${account}:${ref}:${group._revisionId}`
+    if (inFlightMigrationReviews.has(flight)) throw new Error('Firma migrazione gia in corso')
+    inFlightMigrationReviews.add(flight)
+    try {
+      const payload = financialMigrationReviewContent(group, choice)
+      const tags = financialMigrationReviewTags(group)
+      const current = get().getGroup(ref)
+      if (get().pubkey !== account || currentSessionPubkey !== account ||
+          current?._revisionId !== group._revisionId || current?._migrationReviewConflict ||
+          current?._migrationReviewAudit?.status !== 'matching-observed' ||
+          !canReviewFinancialMigration(current, pendingOutbox(account)))
+        throw new Error('Sessione o revisione cambiata: non firmare')
+      const signed = await publishEvent(account, KIND_FINANCIAL_MIGRATION_REVIEW, payload, tags)
+      if (get().pubkey !== account || currentSessionPubkey !== account ||
+          get().getGroup(ref)?._revisionId !== group._revisionId) return signed.id
+      const row = parseFinancialMigrationReviewEvent(signed, group)
+      if (!row) throw new Error('Preferenza firmata non valida: recupera evento originale dalla outbox')
+      get().applyFinancialMigrationReview(ref, row)
+      return signed.id
+    } finally { inFlightMigrationReviews.delete(flight) }
   },
 
   // ─── PHASE 2E-C-A: SIGNED HISTORICAL SNAPSHOT ATTESTATIONS ────────────────
@@ -1026,6 +1121,7 @@ export const useStore = create((set, get) => ({
     // echoed the group definition yet. Other accounts must still independently
     // reconstruct the signed immutable revision chain from relays.
     get().watchGroupInvitations(groupAddress(newGroup))
+    get().watchFinancialMigrationReviews(groupAddress(newGroup))
     get().watchMemberExits(groupAddress(newGroup))
     members.forEach(m => get().fetchAndCacheProfile(m))
     return groupId
@@ -1088,7 +1184,7 @@ export const useStore = create((set, get) => ({
       return { groups: next, toast: 'Membro aggiunto: in attesa di nuovi consensi Nostr' }
     })
     // Stop listeners for the old head and listen for fresh signed consents.
-    for (const kind of ['exp_', 'set_', 'conf_', 'approval_', 'cancel_', 'inv_', 'rev_', 'prior_', 'leave_', 'historic_attest_', 'finance_guard_']) {
+    for (const kind of ['exp_', 'set_', 'conf_', 'approval_', 'cancel_', 'inv_', 'rev_', 'prior_', 'leave_', 'historic_attest_', 'finance_guard_', 'migration_review_']) {
       activeSubs[kind + ref]?.()
       delete activeSubs[kind + ref]
     }
@@ -1163,7 +1259,7 @@ export const useStore = create((set, get) => ({
       saveGroups(account, groups)
       return { groups, toast: 'Uscita registrata: in attesa dei nuovi consensi' }
     })
-    for (const prefix of ['exp_', 'set_', 'conf_', 'approval_', 'cancel_', 'inv_', 'rev_', 'prior_', 'leave_', 'historic_attest_', 'finance_guard_']) {
+    for (const prefix of ['exp_', 'set_', 'conf_', 'approval_', 'cancel_', 'inv_', 'rev_', 'prior_', 'leave_', 'historic_attest_', 'finance_guard_', 'migration_review_']) {
       activeSubs[prefix + ref]?.()
       delete activeSubs[prefix + ref]
     }
