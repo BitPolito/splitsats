@@ -21,6 +21,7 @@ import { parseHistoricalReconciliationEvent, reconciliationRelayReady } from './
 import { KIND_HISTORICAL_DISPOSITION_INTENT } from './constants'
 import { parseHistoricalDispositionIntentEvent } from './historical-disposition-intents'
 import { FinancialKindQuarantine, MIXED_FINANCIAL_KINDS, liveFinancialRelayRiskReasons } from './financial-kind-quarantine'
+import { assertFinancialV2PublishingDisabled } from './financial-migration-preflight'
 import { KIND_EXPENSE_V2, KIND_SETTLEMENT_V2, KIND_CONFIRMATION_V2 } from './constants'
 
 // ─── npub ↔ hex conversion ────────────────────────────────────────────────────
@@ -59,6 +60,8 @@ RELAYS.forEach(r => pool.connect(r))
 // ─── Publish ──────────────────────────────────────────────────────────────────
 
 export async function publishEvent(pubkey, kind, content, tags = []) {
+  // 3B-C: refuse 9600-9602 BEFORE asking the signer or storing outbox events.
+  assertFinancialV2PublishingDisabled(kind)
   const event = {
     pubkey, // always hex
     created_at: Math.floor(Date.now() / 1000),

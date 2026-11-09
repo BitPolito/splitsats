@@ -13,6 +13,7 @@ import { historicalAttestationSummary } from '../lib/historical-attestations'
 import RelaySnapshotDiagnostics from '../components/RelaySnapshotDiagnostics'
 import HistoricalReconciliationPanel from '../components/HistoricalReconciliationPanel'
 import HistoricalDispositionReview from '../components/HistoricalDispositionReview'
+import FinancialMigrationReadiness from '../components/FinancialMigrationReadiness'
 
 const sats = (n) => Number(n).toLocaleString() + ' sat'
 const CATS = { food:'🍕', transport:'🚌', accommodation:'🏠', entertainment:'🎉', utilities:'⚡', other:'📦' }
@@ -93,6 +94,7 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
         </div>
       </div>
 
+      {group._revisionId && <FinancialMigrationReadiness group={group} account={myPubkey} />}
       {group._financialMigrationQuarantine && <section role="alert" style={{
         padding: '12px 16px', borderBottom: '2px solid var(--red)',
         fontFamily: 'var(--mono)', fontSize: 11, lineHeight: 1.7 }}>
