@@ -30,12 +30,12 @@ const payloads = {
   receipt: {settlementEventId:H,from:B,to:A,amount:5},
 }
 
-test('registry lists exactly twelve unique SplitSats application kinds',()=>{
-  assert.equal(SPLITSATS_PROTOCOL_KINDS.length,12)
-  assert.equal(new Set(SPLITSATS_PROTOCOL_KINDS.map(x=>x.kind)).size,12)
+test('registry lists legacy and v2 SplitSats application kinds',()=>{
+  assert.equal(SPLITSATS_PROTOCOL_KINDS.length,15)
+  assert.equal(new Set(SPLITSATS_PROTOCOL_KINDS.map(x=>x.kind)).size,15)
   assert.equal(SPLITSATS_SCHEMA_VERSION,1)
   assert.deepEqual(SPLITSATS_PROTOCOL_KINDS.map(x=>x.kind).sort((a,b)=>a-b),
-    [9000,9001,9002,9591,9592,9593,9594,9595,9596,9597,9598,30001])
+    [9000,9001,9002,9591,9592,9593,9594,9595,9596,9597,9598,9600,9601,9602,30001])
 })
 
 test('NIP-01 profile and unknown kinds are not reinterpreted as application content',()=>{

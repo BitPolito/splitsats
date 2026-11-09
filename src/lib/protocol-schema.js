@@ -5,6 +5,7 @@
 
 import {
   KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION,
+  KIND_EXPENSE_V2, KIND_SETTLEMENT_V2, KIND_CONFIRMATION_V2,
   KIND_GROUP_REVISION, KIND_GROUP_INVITATION, KIND_EXPENSE_DECISION,
   KIND_EXPENSE_CANCELLATION, KIND_MEMBER_EXIT,
   KIND_HISTORICAL_ATTESTATION, KIND_HISTORICAL_RECONCILIATION,
@@ -24,6 +25,9 @@ export const SPLITSATS_PROTOCOL_KINDS = Object.freeze([
   entry(KIND_EXPENSE, 'expense', 'none'),
   entry(KIND_SETTLEMENT, 'settlement-claim', 'none'),
   entry(KIND_CONFIRMATION, 'recipient-confirmation', 'none'),
+  entry(KIND_EXPENSE_V2, 'expense-v2', 'schema-v2'),
+  entry(KIND_SETTLEMENT_V2, 'settlement-claim-v2', 'schema-v2'),
+  entry(KIND_CONFIRMATION_V2, 'recipient-receipt-v2', 'schema-v2'),
   entry(KIND_GROUP_REVISION, 'membership-revision', 'revision-counter'),
   entry(KIND_GROUP_INVITATION, 'invitation-decision', 'none'),
   entry(KIND_EXPENSE_DECISION, 'expense-decision', 'none'),
@@ -36,7 +40,7 @@ export const SPLITSATS_PROTOCOL_KINDS = Object.freeze([
 
 const byKind = new Map(SPLITSATS_PROTOCOL_KINDS.map(info => [info.kind, info]))
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key)
-const permitted = new Set(['legacy', 'schema-v1', 'native-v1'])
+const permitted = new Set(['legacy', 'schema-v1', 'schema-v2', 'native-v1'])
 const result = (status, kind, reason = null) => Object.freeze({status, kind, reason, readable: permitted.has(status)})
 
 // This is intentionally only a *version admission* test. Individual parsers
@@ -50,6 +54,13 @@ export function inspectSplitSatsSchema(kind, content) {
 
   // Never silently interpret a different schema namespace as an old event.
   if (own(content, 'protocolVersion')) return result('unsupported-schema', kind, 'ambiguous-version-field')
+  // New financial kinds are STRICTLY schema-v2 only. Existing kinds still
+  // reject v2 to prevent legacy downcasting or double execution.
+  if (spec.payloadVersion === 'schema-v2') {
+    return content.schemaVersion === 2 && !own(content, 'version')
+      ? result('schema-v2', kind)
+      : result('unsupported-schema', kind, 'new-kind-requires-schema-v2')
+  }
   if (own(content, 'schemaVersion')) {
     // 9596/9597/9598 have exact signed key sets; altering them would change
     // the meaning of the already acknowledged hash. Reserve new kinds instead.
