@@ -3,7 +3,7 @@
 // wait until the previous revision's financial subscription completes its
 // initial relay snapshot (EOSE). EOSE is *not* Nostr finality.
 export function canResumeAfterPriorHistory(group, exitProofStatus = 'pending') {
-  if (!group || group._revisionStatus !== 'verified' ||
+  if (!group || group._financialMigrationQuarantine || group._revisionStatus !== 'verified' ||
       group._priorHistoryChecked !== true || group._historicalActivityDetected === true ||
       !Array.isArray(group._revisions) || group._revisions.length < 2 ||
       group._revisions.at(-1)?.id !== group._revisionId ||

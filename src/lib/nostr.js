@@ -20,6 +20,8 @@ import { KIND_HISTORICAL_RECONCILIATION } from './constants'
 import { parseHistoricalReconciliationEvent, reconciliationRelayReady } from './historical-reconciliation'
 import { KIND_HISTORICAL_DISPOSITION_INTENT } from './constants'
 import { parseHistoricalDispositionIntentEvent } from './historical-disposition-intents'
+import { FinancialKindQuarantine, MIXED_FINANCIAL_KINDS, liveFinancialRelayRiskReasons } from './financial-kind-quarantine'
+import { KIND_EXPENSE_V2, KIND_SETTLEMENT_V2, KIND_CONFIRMATION_V2 } from './constants'
 
 // ─── npub ↔ hex conversion ────────────────────────────────────────────────────
 // Nostr relays always use hex pubkeys. npub is only a display format.
@@ -261,7 +263,9 @@ export function subscribePriorRevisionActivity(group, chain, onActivity, onEose,
   const notify = () => { if (audit) onAudit(audit.report()) }
   const unsubscribe = pool.subscribe({
     id: 'prior_finance_' + address,
-    filters: [{ kinds: [KIND_GROUP_INVITATION, 9000, 9001, 9002, KIND_EXPENSE_DECISION, KIND_EXPENSE_CANCELLATION],
+    filters: [{ kinds: [KIND_GROUP_INVITATION, 9000, 9001, 9002,
+      KIND_EXPENSE_V2, KIND_SETTLEMENT_V2, KIND_CONFIRMATION_V2,
+      KIND_EXPENSE_DECISION, KIND_EXPENSE_CANCELLATION],
       authors, '#a': [address], '#g': [group.id],
       '#r': old.map(r => r.id), limit: 500 }],
     onEvent: onActivity,
@@ -386,6 +390,44 @@ export function subscribeMemberExitRequests(group, parse, onRequest, onEose) {
       if (request) onRequest(request)
     },
     onEose,
+  })
+}
+
+// 3B-B: separate verified mixed-kind observer. 3B-A readers are NOT connected
+// to the live ledger: any new financial kind or contradictory set is quarantined.
+// Never use matched relay sets as proof that missing events do not exist.
+export function subscribeFinancialKindAudit(group, onRisk) {
+  const address = groupAddress(group)
+  if (!address || group?._revisionStatus !== 'verified' ||
+      !Array.isArray(group.members) || !group.members.length ||
+      !group._revisionId) throw new Error('Revisione finanziaria non verificata')
+  const guard = new FinancialKindQuarantine(group)
+  const audit = new RelaySnapshotAudit(RELAYS)
+  let lastAlert = ''
+  const notify = () => {
+    const report = guard.report()
+    const relay = audit.report()
+    // Live financial events can arrive AFTER the initial EOSE, often reaching
+    // different relays at different times. Unlike an immutable historical
+    // checkpoint, that is ordinary operation, NOT a permanent quarantine.
+    const reasons = new Set([...report.reasons, ...liveFinancialRelayRiskReasons(relay)])
+    if (!reasons.size) return
+    const sorted = [...reasons].sort()
+    const fingerprint = JSON.stringify(sorted)
+    if (fingerprint !== lastAlert) {
+      lastAlert = fingerprint
+      onRisk?.({ ...report, status: 'quarantine', reasons: sorted,
+        relayStatus: relay.status, safeForPayments: false, completeHistory: false })
+    }
+  }
+  return pool.subscribe({
+    id: 'financial_kind_audit_' + address,
+    filters: [{ kinds: [...MIXED_FINANCIAL_KINDS], authors: [...new Set(group.members)],
+      '#a': [address], '#g': [group.id], '#r': [group._revisionId], limit: 500 }],
+    onEvent: event => { guard.observe(event); notify() },
+    onRelayEvent: (event, relay) => { audit.record(relay, event); notify() },
+    onRelayEose: relay => { audit.eose(relay); notify() },
+    onRelayReset: (relay, reason) => { audit.reset(relay, reason); notify() },
   })
 }
 

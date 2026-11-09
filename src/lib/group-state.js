@@ -39,6 +39,8 @@ export function mergeVerifiedGroup(groups, incoming) {
       _revisionStatus: revisionChanged ? (incoming._revisionId ? 'pending' : 'legacy') :
         (existing._revisionStatus || (incoming._revisionId ? 'pending' : 'legacy')),
       _financialReviewRequired: revisionChanged ? false : !!existing._financialReviewRequired,
+      _financialMigrationQuarantine: revisionChanged ? false : !!existing._financialMigrationQuarantine,
+      _financialNamespaceRisk: revisionChanged ? null : existing._financialNamespaceRisk || null,
       proposedExpenses: revisionChanged ? [] : existing.proposedExpenses || [],
       _expenseDecisions: revisionChanged ? [] : existing._expenseDecisions || [],
       _cancellationDecisions: revisionChanged ? [] : existing._cancellationDecisions || [],
@@ -59,7 +61,8 @@ export function mergeVerifiedGroup(groups, incoming) {
       _historicalAttestationConflict: revisionChanged ? false : !!existing._historicalAttestationConflict }
     : { ...incoming, expenses: [], settlements: [], confirmations: [], _synced: false,
       _revisions: [], _revisionStatus: incoming._revisionId ? 'pending' : 'legacy',
-      _financialReviewRequired: false, proposedExpenses: [],
+      _financialReviewRequired: false, _financialMigrationQuarantine: false,
+      _financialNamespaceRisk: null, proposedExpenses: [],
       _expenseDecisions: [], _cancellationDecisions: [], _expenseReviewRequired: false,
       _priorHistoryChecked: false,
       _priorFinancialEvidence: [], _priorEvidenceOverflow: false,
@@ -87,6 +90,8 @@ export function mergeVerifiedGroup(groups, incoming) {
 }
 
 export function mayApplyGroupTransaction(groups, ref, transaction) {
-  if (!findGroupByRef(groups, ref) || !transaction || typeof transaction !== 'object') return false
+  const group = findGroupByRef(groups, ref)
+  if (!group || group._financialMigrationQuarantine || !transaction ||
+      typeof transaction !== 'object') return false
   return transaction._legacyUnscoped !== true || !isLegacyAmbiguous(groups, ref)
 }
