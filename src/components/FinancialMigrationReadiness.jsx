@@ -1,6 +1,7 @@
 import { assessFinancialMigrationPreflight } from '../lib/financial-migration-preflight'
 import { pendingOutbox } from '../lib/nostr'
 import { canReviewFinancialMigration, financialMigrationReviewSummary } from '../lib/financial-migration-intents'
+import { assessFinancialClientCutoverBarrier } from '../lib/financial-client-compatibility'
 import { useState } from 'react'
 
 // Signed non-effective review: publication is visible on public Nostr relays.
@@ -14,6 +15,7 @@ export default function FinancialMigrationReadiness({ group, account, onSignRevi
   const result = assessFinancialMigrationPreflight(group, { outboxEntries: entries })
   const summary = financialMigrationReviewSummary(group, group._migrationReviewRows || [],
     group._migrationReviewAudit, group._migrationReviewConflict)
+  const compatibility = assessFinancialClientCutoverBarrier(group, { outboxEntries: entries })
   const eligible = !!account && canReviewFinancialMigration(group, entries) &&
     group._migrationReviewAudit?.status === 'matching-observed' &&
     !group._migrationReviewConflict && summary.status === 'pending' &&
@@ -32,6 +34,14 @@ export default function FinancialMigrationReadiness({ group, account, onSignRevi
     <p>Writer v2 disabilitati. Le osservazioni di due client non dimostrano
       la completezza dei relay né la capacità di tutti i dispositivi.</p>
     <p>Blocchi e prerequisiti: {result.reasons.join(', ')}</p>
+    <p>3B-E · Compatibilità client legacy: <strong>{compatibility.status}</strong>.
+      I vecchi client leggono 9000–9002, ma non vedono 9600–9602.
+      Un doppio writer può duplicare un'operazione o creare saldi divergenti.</p>
+    <p>Attivazione v2: <strong>DISABILITATA</strong>. Nemmeno una revisione firmata
+      unanimemente dimostra che tutti i dispositivi siano aggiornati.</p>
+    <p>Limiti ancora irrisolti: {compatibility.reasons.filter(reason =>
+      ['old-client-retirement-not-verifiable', 'in-place-legacy-v2-cutover-unsafe',
+        'signed-review-is-not-migration-authorization'].includes(reason)).join(', ')}</p>
     <p>3B-D · Preferenze firmate: <strong>{summary.status}</strong> ·
       {summary.signed.length}/{summary.required.length} firme ·
       relay {group._migrationReviewAudit?.status || 'pending'}.</p>
