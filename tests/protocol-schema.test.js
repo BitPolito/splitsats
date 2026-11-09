@@ -31,13 +31,16 @@ const payloads = {
 }
 
 test('registry lists legacy and v2 SplitSats application kinds',()=>{
-  assert.equal(SPLITSATS_PROTOCOL_KINDS.length,16)
-  assert.equal(new Set(SPLITSATS_PROTOCOL_KINDS.map(x=>x.kind)).size,16)
+  assert.equal(SPLITSATS_PROTOCOL_KINDS.length,17)
+  assert.equal(new Set(SPLITSATS_PROTOCOL_KINDS.map(x=>x.kind)).size,17)
   assert.equal(SPLITSATS_SCHEMA_VERSION,1)
   assert.equal(inspectSplitSatsSchema(9603,{version:1}).status,'native-v1')
   assert.equal(isReadableSplitSatsSchema(9603,{version:2}),false)
+  assert.equal(inspectSplitSatsSchema(9604,{version:1}).status,'native-v1')
+  assert.equal(isReadableSplitSatsSchema(9604,{version:2}),false)
+  assert.equal(isReadableSplitSatsSchema(9604,{schemaVersion:2}),false)
   assert.deepEqual(SPLITSATS_PROTOCOL_KINDS.map(x=>x.kind).sort((a,b)=>a-b),
-    [9000,9001,9002,9591,9592,9593,9594,9595,9596,9597,9598,9600,9601,9602,9603,30001])
+    [9000,9001,9002,9591,9592,9593,9594,9595,9596,9597,9598,9600,9601,9602,9603,9604,30001])
 })
 
 test('NIP-01 profile and unknown kinds are not reinterpreted as application content',()=>{

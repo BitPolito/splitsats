@@ -19,6 +19,7 @@ export const KIND_EXPENSE_V2 = 9600
 export const KIND_SETTLEMENT_V2 = 9601
 export const KIND_CONFIRMATION_V2 = 9602
 export const KIND_FINANCIAL_MIGRATION_REVIEW = 9603 // Signed non-effective migration review
+export const KIND_FINANCIAL_DESTINATION_CONSENT = 9604 // Destination-specific review only; not executable
 export const KIND_GROUP_REVISION = 9591 // Immutable owner-signed membership revision
 export const KIND_GROUP_INVITATION = 9592 // Invitee-signed consent decision
 export const KIND_EXPENSE_DECISION = 9593 // Participant-signed expense approval or dispute
