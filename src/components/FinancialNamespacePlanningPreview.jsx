@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { pendingOutbox, subscribeOutbox } from '../lib/nostr'
 import { buildFinancialNamespacePlan } from '../lib/financial-namespace-plan'
 import { buildFinancialDestinationDraft } from '../lib/financial-destination-consent'
+import FinancialDestinationEvidenceComparison from './FinancialDestinationEvidenceComparison'
 import { financialDestinationConsentSummary } from '../lib/financial-destination-consent'
 import { canSignFinancialDestinationConsent } from '../lib/financial-destination-live'
 
@@ -110,6 +111,8 @@ export default function FinancialNamespacePlanningPreview({ group, account, onSi
         </button>
       </>}
       {destinationError && <p role="alert">{destinationError}</p>}
+      <FinancialDestinationEvidenceComparison key={destination.proposalHash}
+        group={group} draft={destination} />
     </section>}
     <p>Writer 9600–9602: <strong>DISABILITATI</strong>.
       Nessun debito importato, pagamento abilitato o vecchio gruppo ritirato.</p>
