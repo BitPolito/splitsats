@@ -1,8 +1,8 @@
 import { create } from 'zustand'
 import { saveGroups, loadProfiles, saveProfiles, loadPubkey, savePubkey, clearAll, clearPubkey } from '../lib/storage'
 import { verifyCachedSigner } from '../lib/session-identity'
-import { publishEvent, fetchProfile, fetchGroups, subscribeGroupRevisions, subscribeGroupInvitations, subscribeExpenseDecisions, subscribeExpenseCancellations, subscribePriorRevisionActivity, subscribeMemberExitRequests, subscribeHistoricalAttestations, subscribeHistoricalReconciliations, subscribeHistoricalDispositionIntents, subscribeFinancialKindAudit, subscribeFinancialMigrationReviews, pendingOutbox, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
-import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION, KIND_GROUP_REVISION, KIND_GROUP_INVITATION, KIND_EXPENSE_DECISION, KIND_EXPENSE_CANCELLATION, KIND_MEMBER_EXIT, KIND_HISTORICAL_ATTESTATION, KIND_HISTORICAL_RECONCILIATION, KIND_HISTORICAL_DISPOSITION_INTENT, KIND_FINANCIAL_MIGRATION_REVIEW } from '../lib/constants'
+import { publishEvent, fetchProfile, fetchGroups, subscribeGroupRevisions, subscribeGroupInvitations, subscribeExpenseDecisions, subscribeExpenseCancellations, subscribePriorRevisionActivity, subscribeMemberExitRequests, subscribeHistoricalAttestations, subscribeHistoricalReconciliations, subscribeHistoricalDispositionIntents, subscribeFinancialKindAudit, subscribeFinancialMigrationReviews, subscribeFinancialDestinationConsents, pendingOutbox, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
+import { KIND_GROUP, KIND_EXPENSE, KIND_SETTLEMENT, KIND_CONFIRMATION, KIND_GROUP_REVISION, KIND_GROUP_INVITATION, KIND_EXPENSE_DECISION, KIND_EXPENSE_CANCELLATION, KIND_MEMBER_EXIT, KIND_HISTORICAL_ATTESTATION, KIND_HISTORICAL_RECONCILIATION, KIND_HISTORICAL_DISPOSITION_INTENT, KIND_FINANCIAL_MIGRATION_REVIEW, KIND_FINANCIAL_DESTINATION_CONSENT } from '../lib/constants'
 import { validPubkey } from '../lib/event-validation'
 import { groupAddress } from '../lib/group-history'
 import { parseGroupRevisionEvent, revisionTags, verifyGroupRevisionHistory, membersForRevisionEvent } from '../lib/group-revision-log'
@@ -28,6 +28,8 @@ import { canReviewFinancialMigration, financialMigrationReviewTags, financialMig
   parseFinancialMigrationReviewEvent, financialMigrationReviewSummary,
   MAX_FINANCIAL_MIGRATION_REVIEWS } from '../lib/financial-migration-intents'
 import { expenseCancellationTags, parseExpenseCancellationEvent, expenseCancellationSummary } from '../lib/expense-cancellations'
+import { buildFinancialDestinationDraft, financialDestinationConsentContent, financialDestinationConsentTags, parseFinancialDestinationConsentEvent, financialDestinationConsentSummary, MAX_FINANCIAL_DESTINATION_CONSENTS } from '../lib/financial-destination-consent'
+import { canSignFinancialDestinationConsent } from '../lib/financial-destination-live'
 
 const randId = () => crypto.randomUUID()
 const now    = () => Math.floor(Date.now() / 1000)
@@ -37,9 +39,14 @@ const subscribedMemberKeys = {}
 const inFlightReconciliations = new Set()
 const inFlightDispositionIntents = new Set()
 const inFlightMigrationReviews = new Set()
+const inFlightDestinationConsents = new Set()
+const destinationWatchStarts = new Set()
+let sessionGeneration = 0
 let currentSessionPubkey = null
 
 function stopActiveSubscriptions() {
+  sessionGeneration += 1
+  destinationWatchStarts.clear()
   Object.values(activeSubs).forEach(unsub => { try { unsub() } catch {} })
   Object.keys(activeSubs).forEach(key => delete activeSubs[key])
   Object.keys(subscribedMemberKeys).forEach(key => delete subscribedMemberKeys[key])
@@ -155,6 +162,8 @@ export const useStore = create((set, get) => ({
           delete activeSubs['finance_guard_' + ref]
           activeSubs['migration_review_' + ref]?.()
           delete activeSubs['migration_review_' + ref]
+          activeSubs['destination_review_' + ref]?.()
+          delete activeSubs['destination_review_' + ref]
           activeSubs['rev_' + ref]?.()
           const head = live._revisionId
           const received = new Map()
@@ -185,6 +194,8 @@ export const useStore = create((set, get) => ({
                       _financialMigrationQuarantine: false, _financialNamespaceRisk: null,
                       _migrationReviewRows: [], _migrationReviewAudit: null,
                       _migrationReviewConflict: false,
+                      _destinationConsentRows: [], _destinationConsentAudit: null,
+                      _destinationConsentConflict: false, _destinationConsentDraftHash: null,
                       _dispositionIntentRows: [], _dispositionIntentConflict: false,
                       _dispositionIntentAudit: null, _dispositionIntentsChecked: false,
                       _memberExitRequests: [], _memberExitStatus: result.removedMembers.length ? 'pending' : 'none',
@@ -208,6 +219,7 @@ export const useStore = create((set, get) => ({
               get().watchHistoricalDispositionIntents(ref)
               get().watchFinancialKindMigration(ref)
               get().watchFinancialMigrationReviews(ref)
+              get().watchFinancialDestinationConsents(ref)
               // Even a seemingly empty current ledger may hide historical
               // transactions: watch old heads independently of new consent.
               if (result.chain.length > 1 && !activeSubs['prior_' + ref]) {
@@ -318,6 +330,7 @@ export const useStore = create((set, get) => ({
             ? { ...g, _migrationReviewAudit: audit, _migrationReviewConflict:
                 !!g._migrationReviewConflict || audit.status === 'conflict' ||
                 audit.status === 'overflow' || audit.status === 'at-limit' } : g) }))
+        get().watchFinancialDestinationConsents(ref)
       },
       () => {
         if (get().pubkey !== account || currentSessionPubkey !== account ||
@@ -350,6 +363,7 @@ export const useStore = create((set, get) => ({
       saveGroups(account, groups)
       return { groups }
     })
+    get().watchFinancialDestinationConsents(ref)
   },
 
   signFinancialMigrationReview: async (ref, choice) => {
@@ -384,6 +398,130 @@ export const useStore = create((set, get) => ({
       get().applyFinancialMigrationReview(ref, row)
       return signed.id
     } finally { inFlightMigrationReviews.delete(flight) }
+  },
+
+  // Phase 3B-H: observe exact-target kind:9604 reviews. Read-only.
+  // Build with an empty outbox ONLY for reconstructing the immutable proposal;
+  // signing below always reads and enforces the ACTUAL account-scoped outbox.
+  watchFinancialDestinationConsents: (ref) => {
+    const group = get().getGroup(ref), account = get().pubkey
+    if (!group || !account || currentSessionPubkey !== account ||
+        !group.members?.includes(account) || group._revisionStatus !== 'verified' ||
+        group._migrationReviewAudit?.status !== 'matching-observed' ||
+        group._migrationReviewConflict || group._destinationConsentConflict ||
+        activeSubs['destination_review_' + ref]) return
+    const head = group._revisionId, epoch = sessionGeneration
+    const flight = `${account}:${ref}:${head}`
+    if (destinationWatchStarts.has(flight)) return
+    destinationWatchStarts.add(flight)
+    void buildFinancialDestinationDraft(group, { outboxEntries: [] }).then(async draft => {
+      if (draft.status !== 'specific-target-review-only') return
+      const current = get().getGroup(ref)
+      if (sessionGeneration !== epoch || currentSessionPubkey !== account ||
+          get().pubkey !== account || current?._revisionId !== head ||
+          current._migrationReviewConflict || current._destinationConsentConflict ||
+          current._migrationReviewAudit?.status !== 'matching-observed' ||
+          activeSubs['destination_review_' + ref]) return
+      // Verify the current *signed review set* still produces the same target.
+      const fresh = await buildFinancialDestinationDraft(current, { outboxEntries: [] })
+      if (fresh.status !== 'specific-target-review-only' ||
+          fresh.proposalHash !== draft.proposalHash ||
+          sessionGeneration !== epoch || currentSessionPubkey !== account ||
+          get().getGroup(ref)?._revisionId !== head) return
+      if (current._destinationConsentDraftHash &&
+          current._destinationConsentDraftHash !== draft.proposalHash) {
+        set(s => ({ groups: s.groups.map(g => groupAddress(g) === ref
+          ? { ...g, _destinationConsentConflict: true } : g) }))
+        return // a different proposal must never inherit previous signatures
+      }
+      set(s => ({ groups: s.groups.map(g => groupAddress(g) === ref && g._revisionId === head
+        ? { ...g, _destinationConsentDraftHash: draft.proposalHash } : g) }))
+      activeSubs['destination_review_' + ref] = subscribeFinancialDestinationConsents(current, draft,
+        row => {
+          if (sessionGeneration === epoch && currentSessionPubkey === account)
+            get().applyFinancialDestinationConsent(ref, row)
+        },
+        audit => {
+          if (sessionGeneration !== epoch || get().pubkey !== account ||
+              get().getGroup(ref)?._revisionId !== head) return
+          set(s => ({ groups: s.groups.map(g => groupAddress(g) === ref && g._revisionId === head
+            ? { ...g, _destinationConsentAudit: audit,
+                _destinationConsentConflict: !!g._destinationConsentConflict ||
+                  ['conflict', 'overflow', 'at-limit', 'invalid'].includes(audit.status) } : g) }))
+        },
+        () => {
+          if (sessionGeneration !== epoch || get().pubkey !== account ||
+              get().getGroup(ref)?._revisionId !== head) return
+          set(s => ({ groups: s.groups.map(g => groupAddress(g) === ref && g._revisionId === head
+            ? { ...g, _destinationConsentConflict: true } : g) }))
+        })
+    }).catch(() => { /* missing/unsafe historical evidence keeps reviews unavailable */
+    }).finally(() => { destinationWatchStarts.delete(flight) })
+  },
+
+  applyFinancialDestinationConsent: (ref, row) => {
+    const account = get().pubkey, group = get().getGroup(ref)
+    if (!account || currentSessionPubkey !== account || !group ||
+        !row || group._revisionId !== row.sourceRevisionEventId) return
+    set(s => {
+      const groups = s.groups.map(g => {
+        if (groupAddress(g) !== ref || g._revisionId !== row.sourceRevisionEventId) return g
+        if (g._destinationConsentDraftHash !== row.proposalHash) {
+          return { ...g, _destinationConsentConflict: true }
+        }
+        const rows = g._destinationConsentRows || []
+        const old = rows.find(x => x.id === row.id)
+        if (old) return JSON.stringify(old) === JSON.stringify(row) ? g :
+          { ...g, _destinationConsentConflict: true }
+        if (rows.length >= MAX_FINANCIAL_DESTINATION_CONSENTS ||
+            rows.some(x => x.member === row.member))
+          return { ...g, _destinationConsentConflict: true }
+        return { ...g, _destinationConsentRows: [...rows, row] }
+      })
+      saveGroups(account, groups)
+      return { groups }
+    })
+  },
+
+  signFinancialDestinationConsent: async (ref, choice) => {
+    const account = get().pubkey, group = get().getGroup(ref)
+    if (!group || !account || currentSessionPubkey !== account ||
+        !group.members?.includes(account))
+      throw new Error('Sessione Nostr o gruppo non verificati')
+    const flight = `${account}:${ref}:${group._revisionId}`
+    if (inFlightDestinationConsents.has(flight))
+      throw new Error('Firma destinazione gia in corso')
+    inFlightDestinationConsents.add(flight)
+    try {
+      const outbox = pendingOutbox(account)
+      const draft = await buildFinancialDestinationDraft(group, { outboxEntries: outbox })
+      if (!canSignFinancialDestinationConsent(group, draft, account, outbox))
+        throw new Error('Destinazione, firme precedenti, relay o outbox non pronti')
+      const content = financialDestinationConsentContent(group, draft, choice)
+      const tags = financialDestinationConsentTags(group, draft)
+      const live = get().getGroup(ref)
+      if (get().pubkey !== account || currentSessionPubkey !== account ||
+          live?._revisionId !== group._revisionId ||
+          !canSignFinancialDestinationConsent(live, draft, account, pendingOutbox(account)))
+        throw new Error('Destinazione o sessione cambiate: non firmare')
+      const fresh = await buildFinancialDestinationDraft(live,
+        { outboxEntries: pendingOutbox(account) })
+      if (fresh.status !== 'specific-target-review-only' ||
+          fresh.proposalHash !== draft.proposalHash ||
+          !canSignFinancialDestinationConsent(get().getGroup(ref), fresh,
+            account, pendingOutbox(account)) || get().pubkey !== account ||
+          currentSessionPubkey !== account)
+        throw new Error('Evidenza di destinazione cambiata: non firmare')
+      // publishEvent validates the signer, persists before network I/O and
+      // retries only the ORIGINAL immutable event after an uncertain ACK.
+      const signed = await publishEvent(account, KIND_FINANCIAL_DESTINATION_CONSENT, content, tags)
+      if (get().pubkey !== account || currentSessionPubkey !== account ||
+          get().getGroup(ref)?._revisionId !== group._revisionId) return signed.id
+      const row = parseFinancialDestinationConsentEvent(signed, group, draft)
+      if (!row) throw new Error('Evento 9604 non valido: controlla la outbox originale')
+      get().applyFinancialDestinationConsent(ref, row)
+      return signed.id
+    } finally { inFlightDestinationConsents.delete(flight) }
   },
 
   // ─── PHASE 2E-C-A: SIGNED HISTORICAL SNAPSHOT ATTESTATIONS ────────────────
@@ -926,6 +1064,7 @@ export const useStore = create((set, get) => ({
         groupAddress(g) === ref && g._revisionId === group._revisionId &&
         !g._financialReviewRequired && !g._expenseReviewRequired
           ? { ...g, _financialHistoryChecked: true } : g) }))
+      get().watchFinancialDestinationConsents(ref)
     }
 
     const unsubExp = subscribeExpenses(
@@ -1184,7 +1323,7 @@ export const useStore = create((set, get) => ({
       return { groups: next, toast: 'Membro aggiunto: in attesa di nuovi consensi Nostr' }
     })
     // Stop listeners for the old head and listen for fresh signed consents.
-    for (const kind of ['exp_', 'set_', 'conf_', 'approval_', 'cancel_', 'inv_', 'rev_', 'prior_', 'leave_', 'historic_attest_', 'finance_guard_', 'migration_review_']) {
+    for (const kind of ['exp_', 'set_', 'conf_', 'approval_', 'cancel_', 'inv_', 'rev_', 'prior_', 'leave_', 'historic_attest_', 'finance_guard_', 'migration_review_', 'destination_review_']) {
       activeSubs[kind + ref]?.()
       delete activeSubs[kind + ref]
     }
@@ -1259,7 +1398,7 @@ export const useStore = create((set, get) => ({
       saveGroups(account, groups)
       return { groups, toast: 'Uscita registrata: in attesa dei nuovi consensi' }
     })
-    for (const prefix of ['exp_', 'set_', 'conf_', 'approval_', 'cancel_', 'inv_', 'rev_', 'prior_', 'leave_', 'historic_attest_', 'finance_guard_', 'migration_review_']) {
+    for (const prefix of ['exp_', 'set_', 'conf_', 'approval_', 'cancel_', 'inv_', 'rev_', 'prior_', 'leave_', 'historic_attest_', 'finance_guard_', 'migration_review_', 'destination_review_']) {
       activeSubs[prefix + ref]?.()
       delete activeSubs[prefix + ref]
     }

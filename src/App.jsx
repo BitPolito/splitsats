@@ -41,6 +41,7 @@ export default function App() {
   const signHistoricalReconciliation = useStore(s => s.signHistoricalReconciliation)
   const signHistoricalDispositionIntent = useStore(s => s.signHistoricalDispositionIntent)
   const signFinancialMigrationReview = useStore(s => s.signFinancialMigrationReview)
+  const signFinancialDestinationConsent = useStore(s => s.signFinancialDestinationConsent)
 
   // Revalidate the cached identity with the active NIP-07 signer before displaying data.
   useEffect(() => { restoreSession() }, [restoreSession])
@@ -173,6 +174,7 @@ export default function App() {
           onSignReconciliation={() => signHistoricalReconciliation(groupAddress(liveGroup))}
           onSignDispositionIntent={mode => signHistoricalDispositionIntent(groupAddress(liveGroup), mode)}
           onSignMigrationReview={choice => signFinancialMigrationReview(groupAddress(liveGroup), choice)}
+          onSignDestinationConsent={choice => signFinancialDestinationConsent(groupAddress(liveGroup), choice)}
         />
       ) : (
         <>
