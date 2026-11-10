@@ -25,7 +25,7 @@ const statBox = (label, value, color) => (
   </div>
 )
 
-export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddExpense, onSettle, onConfirmSettlement, onInviteDecision, onExpenseDecision, onCancelExpense, onAddMember, onRequestExit, onFinalizeExit, onAttestHistorical, onSignReconciliation, onSignDispositionIntent, onSignMigrationReview }) {
+export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddExpense, onSettle, onConfirmSettlement, onInviteDecision, onExpenseDecision, onCancelExpense, onAddMember, onRequestExit, onFinalizeExit, onAttestHistorical, onSignReconciliation, onSignDispositionIntent, onSignMigrationReview, onSignDestinationConsent }) {
   const [tab, setTab] = useState('expenses')
   const [confirmingId, setConfirmingId] = useState(null)
   const [confirmationError, setConfirmationError] = useState('')
@@ -94,7 +94,7 @@ export default function GroupDetail({ group, myPubkey, profiles, onBack, onAddEx
         </div>
       </div>
 
-      {group._revisionId && <FinancialMigrationReadiness group={group} account={myPubkey} onSignReview={onSignMigrationReview} />}
+      {group._revisionId && <FinancialMigrationReadiness group={group} account={myPubkey} onSignReview={onSignMigrationReview} onSignDestinationConsent={onSignDestinationConsent} />}
       {group._financialMigrationQuarantine && <section role="alert" style={{
         padding: '12px 16px', borderBottom: '2px solid var(--red)',
         fontFamily: 'var(--mono)', fontSize: 11, lineHeight: 1.7 }}>

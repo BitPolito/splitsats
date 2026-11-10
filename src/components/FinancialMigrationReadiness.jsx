@@ -6,7 +6,7 @@ import FinancialNamespacePlanningPreview from './FinancialNamespacePlanningPrevi
 import { useState } from 'react'
 
 // Signed non-effective review: publication is visible on public Nostr relays.
-export default function FinancialMigrationReadiness({ group, account, onSignReview }) {
+export default function FinancialMigrationReadiness({ group, account, onSignReview, onSignDestinationConsent }) {
   const [choice, setChoice] = useState('support-review')
   const [consent, setConsent] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -67,7 +67,7 @@ export default function FinancialMigrationReadiness({ group, account, onSignRevi
       </button>
     </>}
     {error && <p role="alert">{error}</p>}
-    <FinancialNamespacePlanningPreview group={group} account={account} />
+    <FinancialNamespacePlanningPreview group={group} account={account} onSignDestinationConsent={onSignDestinationConsent} />
     <p>La migrazione richiederà un nuovo protocollo firmato da tutti i membri,
       verifica dei vecchi client e revisione separata della sicurezza Lightning.</p>
   </details>

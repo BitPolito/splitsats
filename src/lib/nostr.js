@@ -25,6 +25,8 @@ import { assertFinancialV2PublishingDisabled } from './financial-migration-prefl
 import { KIND_EXPENSE_V2, KIND_SETTLEMENT_V2, KIND_CONFIRMATION_V2 } from './constants'
 import { KIND_FINANCIAL_MIGRATION_REVIEW } from './constants'
 import { parseFinancialMigrationReviewEvent, reportLiveFinancialMigrationReviewAudit } from './financial-migration-intents'
+import { KIND_FINANCIAL_DESTINATION_CONSENT } from './constants'
+import { parseFinancialDestinationConsentEvent } from './financial-destination-consent'
 
 // ─── npub ↔ hex conversion ────────────────────────────────────────────────────
 // Nostr relays always use hex pubkeys. npub is only a display format.
@@ -408,6 +410,42 @@ export function subscribeFinancialMigrationReviews(group, onReview, onAudit, onI
   })
   notify()
   return unsubscribe
+}
+
+// 3B-H: live, public, destination-specific preference observation (kind:9604).
+// All events enter via signature-verifying RelayPool. Nothing is credited or
+// migrated, and relay agreement is never treated as payment finality.
+export function subscribeFinancialDestinationConsents(group, draft, onConsent, onAudit, onInvalid) {
+  const address = groupAddress(group)
+  if (!address || group?._revisionStatus !== 'verified' ||
+      draft?.status !== 'specific-target-review-only' ||
+      draft.sourceGroupAddress !== address ||
+      draft.sourceRevisionEventId !== group._revisionId ||
+      !Array.isArray(group.members) || group.members.length < 2)
+    throw new Error('Destinazione Nostr non verificata')
+  const audit = new RelaySnapshotAudit(RELAYS)
+  const notify = () => onAudit?.(reportLiveFinancialMigrationReviewAudit(audit))
+  const stop = pool.subscribe({
+    id: 'finance_destination_review_' + address,
+    filters: [{ kinds: [KIND_FINANCIAL_DESTINATION_CONSENT],
+      authors: [...new Set(group.members)], '#a': [address],
+      '#g': [group.id], '#r': [group._revisionId],
+      limit: 500 }],
+    onEvent: event => {
+      const row = parseFinancialDestinationConsentEvent(event, group, draft)
+      if (row) onConsent?.(row)
+      else onInvalid?.(event.id)
+    },
+    onRelayEvent: (event, relay) => {
+      const before = reportLiveFinancialMigrationReviewAudit(audit).status
+      audit.record(relay, event)
+      if (reportLiveFinancialMigrationReviewAudit(audit).status !== before) notify()
+    },
+    onRelayEose: relay => { audit.eose(relay); notify() },
+    onRelayReset: (relay, reason) => { audit.reset(relay, reason); notify() },
+  })
+  notify()
+  return stop
 }
 
 // Voluntary leave requests stay retrievable by current members even after
