@@ -433,7 +433,7 @@ export function subscribeFinancialDestinationConsents(group, draft, onConsent, o
       limit: 500 }],
     onEvent: event => {
       const row = parseFinancialDestinationConsentEvent(event, group, draft)
-      if (row) onConsent?.(row)
+      if (row) onConsent?.(row, event)
       else onInvalid?.(event.id)
     },
     onRelayEvent: (event, relay) => {

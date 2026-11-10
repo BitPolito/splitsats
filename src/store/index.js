@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { verifyEvent } from 'nostr-tools'
 import { saveGroups, loadProfiles, saveProfiles, loadPubkey, savePubkey, clearAll, clearPubkey } from '../lib/storage'
 import { verifyCachedSigner } from '../lib/session-identity'
 import { publishEvent, fetchProfile, fetchGroups, subscribeGroupRevisions, subscribeGroupInvitations, subscribeExpenseDecisions, subscribeExpenseCancellations, subscribePriorRevisionActivity, subscribeMemberExitRequests, subscribeHistoricalAttestations, subscribeHistoricalReconciliations, subscribeHistoricalDispositionIntents, subscribeFinancialKindAudit, subscribeFinancialMigrationReviews, subscribeFinancialDestinationConsents, pendingOutbox, subscribeExpenses, subscribeSettlements, subscribeConfirmations, pool, npubToHex } from '../lib/nostr'
@@ -28,6 +29,7 @@ import { canReviewFinancialMigration, financialMigrationReviewTags, financialMig
   parseFinancialMigrationReviewEvent, financialMigrationReviewSummary,
   MAX_FINANCIAL_MIGRATION_REVIEWS } from '../lib/financial-migration-intents'
 import { expenseCancellationTags, parseExpenseCancellationEvent, expenseCancellationSummary } from '../lib/expense-cancellations'
+import { rememberSignedDestinationEvidence } from '../lib/financial-destination-evidence'
 import { buildFinancialDestinationDraft, financialDestinationConsentContent, financialDestinationConsentTags, parseFinancialDestinationConsentEvent, financialDestinationConsentSummary, MAX_FINANCIAL_DESTINATION_CONSENTS } from '../lib/financial-destination-consent'
 import { canSignFinancialDestinationConsent } from '../lib/financial-destination-live'
 
@@ -196,6 +198,7 @@ export const useStore = create((set, get) => ({
                       _migrationReviewConflict: false,
                       _destinationConsentRows: [], _destinationConsentAudit: null,
                       _destinationConsentConflict: false, _destinationConsentDraftHash: null,
+                      _destinationSignedEvidence: [],
                       _dispositionIntentRows: [], _dispositionIntentConflict: false,
                       _dispositionIntentAudit: null, _dispositionIntentsChecked: false,
                       _memberExitRequests: [], _memberExitStatus: result.removedMembers.length ? 'pending' : 'none',
@@ -437,9 +440,9 @@ export const useStore = create((set, get) => ({
       set(s => ({ groups: s.groups.map(g => groupAddress(g) === ref && g._revisionId === head
         ? { ...g, _destinationConsentDraftHash: draft.proposalHash } : g) }))
       activeSubs['destination_review_' + ref] = subscribeFinancialDestinationConsents(current, draft,
-        row => {
+        (row, signedEvent) => {
           if (sessionGeneration === epoch && currentSessionPubkey === account)
-            get().applyFinancialDestinationConsent(ref, row)
+            get().applyFinancialDestinationConsent(ref, row, signedEvent)
         },
         audit => {
           if (sessionGeneration !== epoch || get().pubkey !== account ||
@@ -459,7 +462,7 @@ export const useStore = create((set, get) => ({
     }).finally(() => { destinationWatchStarts.delete(flight) })
   },
 
-  applyFinancialDestinationConsent: (ref, row) => {
+  applyFinancialDestinationConsent: (ref, row, signedEvent) => {
     const account = get().pubkey, group = get().getGroup(ref)
     if (!account || currentSessionPubkey !== account || !group ||
         !row || group._revisionId !== row.sourceRevisionEventId) return
@@ -469,14 +472,21 @@ export const useStore = create((set, get) => ({
         if (g._destinationConsentDraftHash !== row.proposalHash) {
           return { ...g, _destinationConsentConflict: true }
         }
+        // RelayPool has already checked the signature; re-verify before
+        // retaining the PUBLIC immutable envelope for offline comparison.
+        const proof = rememberSignedDestinationEvidence(
+          g._destinationSignedEvidence || [], signedEvent, row, verifyEvent)
+        if (proof.status === 'conflict') return { ...g, _destinationConsentConflict: true }
         const rows = g._destinationConsentRows || []
         const old = rows.find(x => x.id === row.id)
-        if (old) return JSON.stringify(old) === JSON.stringify(row) ? g :
-          { ...g, _destinationConsentConflict: true }
+        if (old) return JSON.stringify(old) === JSON.stringify(row)
+          ? { ...g, _destinationSignedEvidence: proof.events }
+          : { ...g, _destinationConsentConflict: true }
         if (rows.length >= MAX_FINANCIAL_DESTINATION_CONSENTS ||
             rows.some(x => x.member === row.member))
           return { ...g, _destinationConsentConflict: true }
-        return { ...g, _destinationConsentRows: [...rows, row] }
+        return { ...g, _destinationConsentRows: [...rows, row],
+          _destinationSignedEvidence: proof.events }
       })
       saveGroups(account, groups)
       return { groups }
@@ -519,7 +529,7 @@ export const useStore = create((set, get) => ({
           get().getGroup(ref)?._revisionId !== group._revisionId) return signed.id
       const row = parseFinancialDestinationConsentEvent(signed, group, draft)
       if (!row) throw new Error('Evento 9604 non valido: controlla la outbox originale')
-      get().applyFinancialDestinationConsent(ref, row)
+      get().applyFinancialDestinationConsent(ref, row, signed)
       return signed.id
     } finally { inFlightDestinationConsents.delete(flight) }
   },
