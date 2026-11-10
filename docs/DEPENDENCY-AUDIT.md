@@ -1,25 +1,41 @@
-# Dependency-security audit — follow-up required
+# Dependency-security audit
 
-On the Mac with npm registry access, capture exact advisories before changing
-versions:
+## Recorded verification
 
-```bash
+On **2026-11-10**, on branch `dev` at commit `c43248f`, the project owner ran:
+
+```sh
 npm ci
-npm audit --json > npm-audit.json || true
+npm audit
 npm audit --omit=dev
-npm outdated
 ```
 
-Review each advisory (package, vulnerable version range, patched version,
-transitive dependency and whether dev-only). Upgrade in a separate branch,
-regenerate `package-lock.json` using npm, then run `npm ci`, `npm test`,
-`npm run build` and browser smoke tests (Nostr signer, LNURL lookup/invoice).
+Both audit commands reported **0 vulnerabilities**. `npm ci` installed 111
+packages and audited 112. The production build reported Vite **6.4.5**. This is
+a snapshot of that lockfile and the npm advisory database on that date; repeat
+the checks against the exact release candidate before deployment.
 
-Do **not** run `npm audit fix --force` blindly; it may install incompatible
-major versions of Vite or other packages. Avoid editing lockfile versions by
-hand. The checked-in `vite@5.4.21` belongs to an unsupported major line;
-plan a tested Vite migration. Vulnerability counts change over time and depend
-on the registry's advisory database. A full audit could not be performed in the
-analysis environment, which cannot resolve registry.npmjs.org.
+CI runs `npm audit --omit=dev --audit-level=moderate`, so the full development
+dependency tree is not currently an enforced CI gate. The full `npm audit`
+above was run locally and passed for this commit.
 
-Do not commit `npm-audit.json` if it contains internal registry information.
+## Release procedure
+
+Before promoting a commit:
+
+```sh
+npm ci
+npm audit
+npm audit --omit=dev --audit-level=moderate
+npm test
+npm run test:e2e
+npm run build
+git diff --check
+```
+
+If an audit reports an advisory, record the package, vulnerable range,
+patched version, dependency path, and whether it is included in production.
+Update dependencies in a separate branch and regenerate `package-lock.json`
+with npm. Do not run `npm audit fix --force` blindly or hand-edit the lockfile.
+
+Do not commit `npm-audit.json` if it contains private registry information.

@@ -35,9 +35,14 @@ with the requested amount. Passing `callback` directly is now rejected.
   require additional LNURL extensions; they may not be compatible.
 - For QR fallback the generated invoice is **not** proof of payment. The app does
   not verify settlement independently. Do **not** auto-mark QR payments as paid.
-- Invoice syntax checking is superficial, not cryptographic BOLT11 verification
-  of payee, amount, expiry or description hash. Add invoice parsing/verification
-  before considering this ready for meaningful real-value payments.
+- The shared `src/lib/bolt11.js` validator decodes BOLT11, checks the requested
+  network and amount, verifies the invoice signature, payment hash and payment
+  secret, validates timestamp/expiry, and compares the description hash with
+  LNURL metadata when supplied. Regression tests cover signed invoices, tampering,
+  amount/network/expiry mismatches and preimage-to-payment-hash verification.
+- Invoice validation does **not** prove that an invoice was paid. A QR invoice
+  remains pending until the recipient confirms receipt; never treat invoice
+  generation or a payer-side wallet response alone as settlement evidence.
 - There is no durable per-IP rate limit. For an internet-exposed deployment,
   configure platform-level quotas or rate limiting to prevent relay abuse.
 - `lud06` LNURL strings still are not Lightning Addresses; separately support
