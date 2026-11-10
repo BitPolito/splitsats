@@ -15,9 +15,9 @@ packages and audited 112. The production build reported Vite **6.4.5**. This is
 a snapshot of that lockfile and the npm advisory database on that date; repeat
 the checks against the exact release candidate before deployment.
 
-CI runs `npm audit --omit=dev --audit-level=moderate`, so the full development
-dependency tree is not currently an enforced CI gate. The full `npm audit`
-above was run locally and passed for this commit.
+The CI workflow now runs both `npm audit --audit-level=moderate` for the full
+dependency tree and `npm audit --omit=dev --audit-level=moderate` for production.
+The full local audit also passed for this commit.
 
 ## Release procedure
 
